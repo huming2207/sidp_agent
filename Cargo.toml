@@ -7,7 +7,9 @@ publish = false
 license-file = "LICENSE.md"
 
 [dependencies]
+gdbstub = "0.7.10"
 serialport = { version = "4.10", default-features = false }
+clap = { version = "4.6", features = ["derive"] }
 thiserror = "2"
 
 [lints.rust]

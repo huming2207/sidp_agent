@@ -36,6 +36,39 @@ settling interval before ATTACH. An attach timeout means close/reopen manually;
 there is no readiness handshake in SIDP v1. DTR deassertion on close triggers
 the firmware's target cleanup. Host tests cannot validate physical USB timing.
 
+## CLI and GDB
+
+```sh
+cargo run -- ports
+cargo run -- gdb --port /dev/ttyACM0
+# In another terminal (ARM-capable GDB):
+arm-none-eabi-gdb firmware.elf
+(gdb) target remote 127.0.0.1:3333
+(gdb) info registers
+(gdb) x/16wx $sp
+(gdb) hbreak main
+(gdb) continue
+(gdb) stepi
+(gdb) detach
+```
+
+Windows ports use names such as `COM3`; macOS commonly uses `/dev/cu.usbmodem*`.
+The device must expose the SIDP CDC interface and already have the firmware
+backend/owner task integrated. The standalone SIDP component is not sufficient.
+
+Only loopback listeners are accepted. One CLI process serves one GDB connection,
+then exits. `--resume-on-detach` opts into resume on a clean GDB detach; otherwise
+target cleanup keeps it halted. GDB EOF, process exit, or USB errors close the
+physical connection. The device's disconnect policy is responsible for cleanup.
+`--no-dtr` is for PTY testing only. See `gdb --help` for timeout/settling controls.
+
+Use **`hbreak`**, not `break`: this milestone implements explicit hardware
+breakpoints and rejects software breakpoint requests. GDB `load`/Flash writes,
+MMIO, watchpoints, signal delivery, reset commands, RTOS threads and extended
+remote launch are not supported. Native single stepping is exposed only when
+advertised by the firmware. M4 FPU register descriptions expose GDB D0-D15 by
+combining SIDP S-register pairs; unavailable registers remain unavailable.
+
 ## License
 
 This project is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE.md).
