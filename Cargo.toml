@@ -1,0 +1,11 @@
+[package]
+name = "sidp-agent"
+version = "0.1.0"
+edition = "2024"
+description = "USB SIDP to local GDB bridge for Soul Injector"
+publish = false
+license-file = "LICENSE.md"
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
