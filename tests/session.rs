@@ -170,10 +170,26 @@ fn stale_and_malformed_events_are_fatal() {
     }
 }
 #[test]
-fn detach_closes_and_empty_register_requests_do_not_fetch() {
+fn detach_closes_the_physical_connection() {
     let (mut session, wire) = setup(15);
     wire.borrow_mut().incoming.push_back(response(2, 2, &[]));
     session.detach(false).unwrap();
     assert!(session.is_closed());
     assert_eq!(&wire.borrow().sent[1].payload, &[1, 0, 0, 0]);
+}
+
+#[test]
+fn target_running_response_discards_old_stop_cache() {
+    let (mut session, wire) = setup(15);
+    let mut running = response(0x10, 2, &[]);
+    running.payload = 10i32.to_le_bytes().to_vec();
+    wire.borrow_mut().incoming.push_back(running);
+    assert!(session.read_memory(0x20000000, &mut [0; 4]).is_err());
+    assert!(session.stop().is_none());
+    assert!(session.read_registers(&[0]).is_err());
+    assert!(!session.is_closed());
+    // A later unsolicited stop can establish a new valid generation.
+    wire.borrow_mut().incoming.push_back(stopped(2, false));
+    session.poll(Duration::from_millis(1)).unwrap();
+    assert_eq!(session.stop().unwrap().id, 2);
 }

@@ -73,6 +73,11 @@ impl<T: Transport> Session<T> {
             }
             let status = i32::from_le_bytes(frame.payload[..4].try_into().unwrap());
             if status != 0 {
+                if status == 10 {
+                    // The target has contradicted our halted observation.
+                    // Never answer subsequent reads from its old snapshot.
+                    self.stop = None;
+                }
                 if matches!(status, 12 | 13) {
                     self.close();
                 }

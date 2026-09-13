@@ -31,7 +31,8 @@ host cannot prove cleanup succeeded after losing the link.
 
 Partial multi-chunk writes are possible: earlier chunks may have succeeded even
 when a later chunk fails. Registers and stack cache are invalidated before writes.
-Any target status that makes stop identity uncertain closes the session.
+A TARGET_RUNNING response discards the old stop observation. TARGET_LOST and
+STALE_STOP close the connection; a later stop must never reuse the old cache.
 
 ## Cache and memory safety
 
