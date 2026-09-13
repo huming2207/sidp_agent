@@ -69,6 +69,36 @@ remote launch are not supported. Native single stepping is exposed only when
 advertised by the firmware. M4 FPU register descriptions expose GDB D0-D15 by
 combining SIDP S-register pairs; unavailable registers remain unavailable.
 
+## End-to-end testing without hardware
+
+On Linux/POSIX, install an ARM-capable GDB (`gdb-multiarch` on Ubuntu), a GNU
+C++20 compiler and Python 3, then run:
+
+```sh
+python3 tests/e2e/run.py \
+  --sidp-client ../soul-injector/components/sidp_client \
+  --gdb gdb-multiarch
+```
+
+The runner builds the **actual** C++ `sidp_session.cpp` and CRC implementation
+from that checkout, links a deterministic register/RAM backend, and connects
+it to the actual Rust CLI through a serial PTY. Real GDB exercises M0, M3, M4
+without FPU, and M4 with FPU. The test fragments stream writes into seven-byte
+pieces and covers attach, snapshot registers/stack, FPU aliases, hardware
+breakpoints, continue, single step, Ctrl-C halt, register writes, multi-chunk
+RAM transfers, Flash-write rejection and detach. Additional cases verify that
+USB loss, invalid CRC and debugger EOF end the process without replay.
+
+Supply `--output /tmp/sidp-e2e` to retain diagnostic logs in a chosen directory.
+The runner fails rather than silently skips if GDB or the C++ component is
+missing. `cargo test` needs neither of those tools nor any hardware.
+
+GitHub Actions runs formatting, Clippy (warnings denied), tests and rustdoc on
+Linux, macOS and Windows, plus the POSIX GDB end-to-end suite on Linux. CI pins
+its external C++ fixture revision; update it deliberately when the protocol
+changes. Physical DTR signaling, USB detach timing, SWD and instruction execution
+are **not** simulated by the PTY/register model and still need hardware tests.
+
 ## License
 
 This project is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE.md).
