@@ -83,7 +83,7 @@ impl<T: Transport> SingleThreadBase for Adapter<T> {
             return Err(TargetError::NonFatal);
         }
         let mut values = Vec::new();
-        for (id, bytes) in ids.into_iter().zip(regs.0.chunks_exact(4)) {
+        for (id, bytes) in ids.into_iter().zip(regs.0.as_chunks::<4>().0) {
             let bytes: Option<Vec<u8>> = bytes.iter().copied().collect();
             let bytes = bytes.ok_or(TargetError::NonFatal)?;
             values.push((id, u32::from_le_bytes(bytes.try_into().unwrap())));
@@ -150,8 +150,8 @@ impl<T: Transport> SingleRegisterAccess<()> for Adapter<T> {
         }
         let values: Vec<_> = ids
             .iter()
-            .zip(bytes.chunks_exact(4))
-            .map(|(&id, b)| (id, u32::from_le_bytes(b.try_into().unwrap())))
+            .zip(bytes.as_chunks::<4>().0)
+            .map(|(&id, b)| (id, u32::from_le_bytes(*b)))
             .collect();
         let result = self.session.write_registers(&values);
         map(self, result)

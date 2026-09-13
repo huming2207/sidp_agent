@@ -55,6 +55,14 @@ impl Frame {
     }
 
     /// Encode a bounded frame, computing CRC over header bytes 0..8 and payload.
+    ///
+    /// ```
+    /// use sidp_agent::codec::{Frame, REQUEST};
+    /// let request = Frame { kind: REQUEST, opcode: 1, id: 1, payload: vec![0; 8] };
+    /// let bytes = request.encode()?;
+    /// assert_eq!(Frame::decode(&bytes)?, request);
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
     pub fn encode(&self) -> io::Result<Vec<u8>> {
         self.check()?;
         let mut out = vec![1, self.kind];

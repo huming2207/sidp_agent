@@ -1,7 +1,7 @@
 # Soul Agent
 
-Rust host-side SIDP implementation for Soul Injector. Development starts with
-SIDP v1 framing and proceeds to a USB CDC session and a local GDB RSP server.
+Rust host-side SIDP implementation for Soul Injector, with a checked SIDP v1
+codec, USB CDC session, stop snapshot cache and local GDB RSP server.
 WebSocket and graphical UI support are outside this first milestone.
 
 ## Development
