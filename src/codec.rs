@@ -176,11 +176,24 @@ impl<'a> Reader<'a> {
         self.bytes = tail;
         Ok(head)
     }
+    pub fn u8(&mut self) -> io::Result<u8> {
+        Ok(self.take(1)?[0])
+    }
     pub fn u16(&mut self) -> io::Result<u16> {
         Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
     }
     pub fn u32(&mut self) -> io::Result<u32> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    pub fn u64(&mut self) -> io::Result<u64> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+    pub fn end(self) -> io::Result<()> {
+        if self.bytes.is_empty() {
+            Ok(())
+        } else {
+            Err(invalid("trailing SIDP payload bytes"))
+        }
     }
 }
 

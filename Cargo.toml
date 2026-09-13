@@ -6,6 +6,10 @@ description = "USB SIDP to local GDB bridge for Soul Injector"
 publish = false
 license-file = "LICENSE.md"
 
+[dependencies]
+serialport = { version = "4.10", default-features = false }
+thiserror = "2"
+
 [lints.rust]
 missing_docs = "warn"
 unsafe_code = "forbid"
