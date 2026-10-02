@@ -2,11 +2,14 @@
 //!
 //! The firmware no longer parses YAML. Every check it used to make is done
 //! here instead, together with the nanopb size limits from [`crate::job`].
+mod images;
 mod procedure;
 mod source;
 mod target;
 
-use crate::job::{Job, Procedure, SchemaVersion};
+pub use images::ImageHashes;
+
+use crate::job::{Job, MAX_NAME_LEN, Procedure, SchemaVersion};
 use serde::de::DeserializeOwned;
 
 /// A compile error describing which YAML input or field is wrong.
@@ -16,8 +19,10 @@ pub struct CompileError(pub String);
 
 type Result<T> = std::result::Result<T, CompileError>;
 
-/// YAML text for one job.
+/// YAML text and image hashes for one job.
 pub struct Sources<'a> {
+    /// Job name shown by the device; defaults to the variant name.
+    pub name: Option<&'a str>,
     /// target.yaml contents.
     pub target: &'a str,
     /// Variant to select when target.yaml lists several.
@@ -26,6 +31,8 @@ pub struct Sources<'a> {
     pub pre_program: Option<&'a str>,
     /// post_prog.yaml contents, if any.
     pub post_program: Option<&'a str>,
+    /// SHA-256 of each image the job programs, by device asset name.
+    pub images: &'a ImageHashes,
 }
 
 /// A compiled job plus non-fatal notes such as skipped legacy steps.
@@ -43,12 +50,16 @@ pub fn compile(sources: &Sources) -> Result<Compiled> {
     let target = target::convert(&file, sources.variant, &mut warnings)?;
     let pre_program = optional_procedure(sources.pre_program, "pre-program", &mut warnings)?;
     let post_program = optional_procedure(sources.post_program, "post-program", &mut warnings)?;
-    let job = Job {
+    let name = sources.name.unwrap_or(&target.variant_name).to_owned();
+    check_len(&name, MAX_NAME_LEN, "job name")?;
+    let mut job = Job {
         schema_version: SchemaVersion::Current as i32,
         target: Some(target),
         pre_program,
         post_program,
+        name,
     };
+    images::pin(&mut job, sources.images, &mut warnings)?;
     Ok(Compiled { job, warnings })
 }
 

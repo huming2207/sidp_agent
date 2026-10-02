@@ -36,21 +36,39 @@ settling interval before ATTACH. An attach timeout means close/reopen manually;
 there is no readiness handshake in SIDP v1. DTR deassertion on close triggers
 the firmware's target cleanup. Host tests cannot validate physical USB timing.
 
-## Compiling programming jobs
+## Programming jobs
 
-The firmware does not parse YAML. Compile the probe-rs style `target.yaml`
-and the optional pre/post procedure files into a job, then copy it to the
-device as `/data/job.pb`:
+The firmware does not parse YAML and keeps exactly one job. Push it over USB
+with its images; the agent compiles the YAML, uploads only what the device
+does not already have, and activates the job:
 
 ```sh
-cargo run -- compile --target target.yaml --pre pre_prog.yaml --post post_prog.yaml -o job.pb
+cargo run -- job push --port /dev/ttyACM0 \
+    --target target.yaml --pre pre_prog.yaml --post post_prog.yaml \
+    --image firmware.bin=build/app.bin [--name line-a] [--auto]
+cargo run -- job run --port /dev/ttyACM0 --wait    # one run, waits for the result
+cargo run -- job status --port /dev/ttyACM0
+cargo run -- job cancel --port /dev/ttyACM0
+cargo run -- device info --port /dev/ttyACM0
+cargo run -- asset push --port /dev/ttyACM0 build/app.bin --name firmware.bin
 ```
 
-Use `--variant NAME` when `target.yaml` lists several variants. The compiler
+`--image NAME=FILE` gives each image the job programs: `firmware.bin` for
+Cortex-M targets, and for ESP32 targets every `images[].path` in
+`target.yaml`, which must be `/data/<NAME>`. The job pins each image's SHA-256
+and the device refuses to run with any other image. `--auto` also runs the job
+whenever a target is plugged in; otherwise it runs only on `job run`. A device
+busy programming answers `STATUS_BUSY` to anything that would change the job
+or its files.
+
+`compile` writes the same job to a file without a device (`-o job.pb`). Use
+`--variant NAME` when `target.yaml` lists several variants. The compiler
 applies the checks the firmware parser used to make and the device's fixed
-size limits, so errors are reported on the host. `proto/job.proto` and
-`proto/job.options` are copies of Soul Injector's `sidp_client/proto`; CI
-checks they stay identical.
+size limits, so errors are reported on the host.
+
+`proto/*.proto` and `proto/*.options` are copies of Soul Injector's
+`sidp_client/proto`; CI checks they stay identical. The management opcodes are
+documented in `sidp_client/docs/sidp-management.md`.
 
 ## CLI and GDB
 

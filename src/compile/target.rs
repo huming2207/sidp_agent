@@ -139,6 +139,7 @@ fn convert_cortex_m(
         })?;
     Ok(CortexM {
         algorithm: Some(convert_algorithm(source)?),
+        ..Default::default()
     })
 }
 
@@ -264,6 +265,7 @@ fn convert_images(images: &[ImageSource]) -> Result<Vec<Esp32Image>> {
         converted.push(Esp32Image {
             path: image.path.clone(),
             offset: to_u32(image.offset, "image offset")?,
+            ..Default::default()
         });
     }
     Ok(converted)

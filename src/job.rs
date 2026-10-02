@@ -8,7 +8,7 @@
 
 include!(concat!(env!("OUT_DIR"), "/si.job.rs"));
 
-/// Longest flash algorithm, variant or self-test name (nanopb max_size 32).
+/// Longest job, flash algorithm, variant or self-test name (nanopb max_size 32).
 pub const MAX_NAME_LEN: usize = 31;
 /// Longest ESP32 chip name (nanopb max_size 24).
 pub const MAX_CHIP_LEN: usize = 23;
@@ -56,6 +56,7 @@ mod tests {
     fn limits_match_nanopb_options() {
         assert_eq!(max_len("si.job.FlashAlgorithm.name"), MAX_NAME_LEN);
         assert_eq!(max_len("si.job.Target.variant_name"), MAX_NAME_LEN);
+        assert_eq!(max_len("si.job.Job.name"), MAX_NAME_LEN);
         assert_eq!(max_len("si.job.SelfTest.name"), MAX_NAME_LEN);
         assert_eq!(max_len("si.job.Esp32.chip"), MAX_CHIP_LEN);
         assert_eq!(max_len("si.job.Esp32Image.path"), MAX_PATH_LEN);

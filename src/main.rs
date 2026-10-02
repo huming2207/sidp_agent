@@ -1,18 +1,20 @@
-//! Command-line USB SIDP to local GDB bridge. See `sidp-agent --help`.
+//! Command-line USB SIDP to local GDB bridge and Soul Injector job manager.
+//! See `sidp-agent --help`.
+mod commands;
+
 use clap::{Parser, Subcommand};
-use prost::Message;
-use sidp_agent::compile::{self, Sources};
-use sidp_agent::{session::Session, transport::UsbCdc};
+use commands::{Connection, JobSource};
+use sidp_agent::{manage, session};
 use std::{
     net::{SocketAddr, TcpListener},
-    path::{Path, PathBuf},
-    time::Duration,
+    path::PathBuf,
+    process::ExitCode,
 };
 
 #[derive(Parser)]
 #[command(
     version,
-    about = "Soul Injector USB SIDP to local GDB bridge and job compiler"
+    about = "Soul Injector USB SIDP to local GDB bridge and job manager"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -24,124 +26,176 @@ enum Command {
     Ports,
     /// Attach over USB CDC and serve one local GDB connection.
     Gdb {
-        /// USB CDC path, e.g. /dev/ttyACM0 or COM3.
-        #[arg(long)]
-        port: String,
+        #[command(flatten)]
+        connection: Connection,
         /// Local GDB address. Only loopback addresses are accepted.
         #[arg(long, default_value = "127.0.0.1:3333")]
         listen: SocketAddr,
-        /// CDC line coding; does not set SWD speed.
-        #[arg(long, default_value_t = 115200)]
-        baud: u32,
-        /// Per-operation timeout in milliseconds (no automatic retries).
-        #[arg(long,default_value_t=5000,value_parser=clap::value_parser!(u64).range(1..=60000))]
-        timeout_ms: u64,
-        /// Wait after DTR assertion for the firmware to accept the connection.
-        #[arg(long,default_value_t=250,value_parser=clap::value_parser!(u64).range(0..=60000))]
-        settle_ms: u64,
         /// Resume on clean GDB detach (default keeps the target halted).
         #[arg(long)]
         resume_on_detach: bool,
-        /// Skip DTR modem control for PTY testing only; real hardware requires DTR.
-        #[arg(long)]
-        no_dtr: bool,
     },
-    /// Compile target.yaml and optional procedure YAML into a job file.
+    /// Compile target.yaml, optional procedure YAML and images into a job file.
     Compile {
-        /// probe-rs style target description.
-        #[arg(long)]
-        target: PathBuf,
-        /// Variant to select when target.yaml lists several.
-        #[arg(long)]
-        variant: Option<String>,
-        /// Procedure run before target detection (pre_prog.yaml).
-        #[arg(long)]
-        pre: Option<PathBuf>,
-        /// Procedure run after self tests (post_prog.yaml).
-        #[arg(long)]
-        post: Option<PathBuf>,
-        /// Output job file; copy it to the device as /data/job.pb.
+        #[command(flatten)]
+        source: JobSource,
+        /// Output job file.
         #[arg(short, long, default_value = "job.pb")]
         output: PathBuf,
     },
+    /// Query the device.
+    Device {
+        #[command(subcommand)]
+        command: DeviceCommand,
+    },
+    /// Upload files to the device.
+    Asset {
+        #[command(subcommand)]
+        command: AssetCommand,
+    },
+    /// Manage the device's programming job.
+    Job {
+        #[command(subcommand)]
+        command: JobCommand,
+    },
 }
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    match Cli::parse().command {
+
+#[derive(Subcommand)]
+enum DeviceCommand {
+    /// Serial number, firmware version and storage use.
+    Info {
+        #[command(flatten)]
+        connection: Connection,
+    },
+}
+
+#[derive(Subcommand)]
+enum AssetCommand {
+    /// Upload one file to /data on the device.
+    Push {
+        #[command(flatten)]
+        connection: Connection,
+        /// File to upload.
+        file: PathBuf,
+        /// Device file name; defaults to the local file name.
+        #[arg(long)]
+        name: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum JobCommand {
+    /// Compile a job, upload it with its images and make it the device's job.
+    Push {
+        #[command(flatten)]
+        connection: Connection,
+        #[command(flatten)]
+        source: JobSource,
+        /// Also run the job whenever a target is plugged in.
+        #[arg(long)]
+        auto: bool,
+    },
+    /// Run the device's job once.
+    Run {
+        #[command(flatten)]
+        connection: Connection,
+        /// Wait for the result; exits non-zero unless the run passed.
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Show the device's job, trigger and last result.
+    Status {
+        #[command(flatten)]
+        connection: Connection,
+    },
+    /// Stop the run in progress.
+    Cancel {
+        #[command(flatten)]
+        connection: Connection,
+        /// Run to cancel; 0 cancels whatever is running.
+        #[arg(long, default_value_t = 0)]
+        run_id: u32,
+    },
+}
+
+fn main() -> ExitCode {
+    let Err(error) = run(Cli::parse().command) else {
+        return ExitCode::SUCCESS;
+    };
+    match error.downcast_ref::<session::Error>() {
+        Some(session::Error::Status(status)) => {
+            eprintln!(
+                "error: {} (status {status})",
+                manage::describe_status(*status)
+            );
+        }
+        _ => eprintln!("error: {error}"),
+    }
+    ExitCode::FAILURE
+}
+
+fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
         Command::Ports => {
             for port in serialport::available_ports()? {
                 println!("{} {:?}", port.port_name, port.port_type);
             }
+            Ok(())
         }
         Command::Gdb {
-            port,
+            connection,
             listen,
-            baud,
-            timeout_ms,
-            settle_ms,
             resume_on_detach,
-            no_dtr,
-        } => {
-            if !listen.ip().is_loopback() {
-                return Err("--listen must be a loopback address".into());
-            }
-            // Reserve the listener before touching the target; bind failure must
-            // not leave an otherwise untouched device halted.
-            let listener = TcpListener::bind(listen)?;
-            let usb = UsbCdc::open(&port, baud, Duration::from_millis(settle_ms), !no_dtr)?;
-            let mut session = Session::new(usb, Duration::from_millis(timeout_ms));
-            session.attach()?;
-            let info = session.info().unwrap();
-            eprintln!(
-                "Attached profile={} capabilities=0x{:x}",
-                info.profile, info.capabilities
-            );
-            println!("GDB listening on {}", listener.local_addr()?);
-            let requests = sidp_agent::gdb::serve(listener, session, resume_on_detach)?;
-            eprintln!("Detached; {requests} SIDP requests sent");
-        }
-        Command::Compile {
-            target,
-            variant,
-            pre,
-            post,
-            output,
-        } => compile_job(
-            &target,
-            variant.as_deref(),
-            pre.as_deref(),
-            post.as_deref(),
-            &output,
-        )?,
+        } => serve_gdb(&connection, listen, resume_on_detach),
+        Command::Compile { source, output } => commands::compile_job(&source, &output),
+        Command::Device {
+            command: DeviceCommand::Info { connection },
+        } => commands::device_info(&connection),
+        Command::Asset {
+            command:
+                AssetCommand::Push {
+                    connection,
+                    file,
+                    name,
+                },
+        } => commands::asset_push(&connection, &file, name.as_deref()),
+        Command::Job { command } => run_job_command(command),
     }
-    Ok(())
 }
 
-fn read_optional(path: Option<&Path>) -> std::io::Result<Option<String>> {
-    path.map(std::fs::read_to_string).transpose()
+fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        JobCommand::Push {
+            connection,
+            source,
+            auto,
+        } => commands::job_push(&connection, &source, auto),
+        JobCommand::Run { connection, wait } => commands::job_run(&connection, wait),
+        JobCommand::Status { connection } => commands::job_status(&connection),
+        JobCommand::Cancel { connection, run_id } => commands::job_cancel(&connection, run_id),
+    }
 }
 
-fn compile_job(
-    target: &Path,
-    variant: Option<&str>,
-    pre: Option<&Path>,
-    post: Option<&Path>,
-    output: &Path,
+fn serve_gdb(
+    connection: &Connection,
+    listen: SocketAddr,
+    resume_on_detach: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let target_text = std::fs::read_to_string(target)?;
-    let pre_text = read_optional(pre)?;
-    let post_text = read_optional(post)?;
-    let sources = Sources {
-        target: &target_text,
-        variant,
-        pre_program: pre_text.as_deref(),
-        post_program: post_text.as_deref(),
-    };
-    let compiled = compile::compile(&sources)?;
-    for warning in &compiled.warnings {
-        eprintln!("warning: {warning}");
+    if !listen.ip().is_loopback() {
+        return Err("--listen must be a loopback address".into());
     }
-    let bytes = compiled.job.encode_to_vec();
-    std::fs::write(output, &bytes)?;
-    println!("Wrote {} ({} bytes)", output.display(), bytes.len());
+    // Reserve the listener before touching the target; bind failure must
+    // not leave an otherwise untouched device halted.
+    let listener = TcpListener::bind(listen)?;
+    let mut session = connection.open()?;
+    session.attach()?;
+    let info = session.info().unwrap();
+    eprintln!(
+        "Attached profile={} capabilities=0x{:x}",
+        info.profile, info.capabilities
+    );
+    println!("GDB listening on {}", listener.local_addr()?);
+    let requests = sidp_agent::gdb::serve(listener, session, resume_on_detach)?;
+    eprintln!("Detached; {requests} SIDP requests sent");
     Ok(())
 }

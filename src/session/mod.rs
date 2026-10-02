@@ -40,6 +40,7 @@ pub const CAP_FPU: u32 = 1 << 9;
 
 mod control;
 mod exchange;
+mod management;
 mod memory;
 mod registers;
 mod types;

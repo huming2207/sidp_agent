@@ -40,12 +40,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: huming2207/sidp_client
-          ref: efed1a14d565f3069ae1a17cade8e97f8d8eb6b4
+          ref: 4c0ace092d54fce2bb2fe079866635fd01d994f6
           path: sidp-client-fixture
-      - name: Check job schema copy matches sidp_client
+      - name: Check schema copies match sidp_client
         run: |
-          diff proto/job.proto sidp-client-fixture/proto/job.proto
-          diff proto/job.options sidp-client-fixture/proto/job.options
+          for file in job.proto job.options manage.proto manage.options; do
+            diff "proto/$file" "sidp-client-fixture/proto/$file"
+          done
       - name: Install host tools
         run: |
           sudo apt-get update

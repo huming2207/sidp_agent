@@ -1,12 +1,15 @@
 //! Job compiler tests against the Soul Injector example YAML files.
 use prost::Message;
-use sidp_agent::compile::{Compiled, Sources, compile};
+use sidp_agent::compile::{Compiled, ImageHashes, Sources, compile};
 use sidp_agent::job::step::Op;
 use sidp_agent::job::{FlashAlgorithm, Job, MAX_STEPS, SchemaVersion, Target};
 
 const TARGET: &str = include_str!("fixtures/stm32wle5cc.yaml");
 const PRE: &str = include_str!("fixtures/pre_prog.yaml");
 const POST: &str = include_str!("fixtures/post_prog.yaml");
+
+const FIRMWARE_HASH: [u8; 32] = [0x11; 32];
+const BOOTLOADER_HASH: [u8; 32] = [0x22; 32];
 
 const ESP32_TARGET: &str = r#"
 family: esp32
@@ -20,21 +23,54 @@ variants:
       - { path: /data/firmware.bin, offset: 0x10000 }
 "#;
 
-fn compile_target(target: &str, pre: Option<&str>, post: Option<&str>) -> Result<Compiled, String> {
+fn image_hashes(names: &[(&str, [u8; 32])]) -> ImageHashes {
+    let mut hashes = ImageHashes::new();
+    for (name, hash) in names {
+        hashes.insert((*name).to_owned(), *hash);
+    }
+    hashes
+}
+
+fn compile_with(
+    target: &str,
+    name: Option<&str>,
+    pre: Option<&str>,
+    post: Option<&str>,
+    images: &ImageHashes,
+) -> Result<Compiled, String> {
     let sources = Sources {
+        name,
         target,
         variant: None,
         pre_program: pre,
         post_program: post,
+        images,
     };
     compile(&sources).map_err(|e| e.to_string())
 }
 
-fn compile_error(target: &str, pre: Option<&str>) -> String {
-    match compile_target(target, pre, None) {
+fn esp32_images() -> ImageHashes {
+    image_hashes(&[
+        ("firmware.bin", FIRMWARE_HASH),
+        ("bootloader.bin", BOOTLOADER_HASH),
+    ])
+}
+
+/// Compiles a Cortex-M target with its firmware image pinned.
+fn compile_target(target: &str, pre: Option<&str>, post: Option<&str>) -> Result<Compiled, String> {
+    let images = image_hashes(&[("firmware.bin", FIRMWARE_HASH)]);
+    compile_with(target, None, pre, post, &images)
+}
+
+fn error_of(result: Result<Compiled, String>) -> String {
+    match result {
         Ok(_) => panic!("compile unexpectedly succeeded"),
         Err(error) => error,
     }
+}
+
+fn compile_error(target: &str, pre: Option<&str>) -> String {
+    error_of(compile_target(target, pre, None))
 }
 
 fn target_of(job: &Job) -> &Target {
@@ -63,8 +99,13 @@ fn write_steps(count: usize) -> String {
 fn example_target_matches_firmware_parser_rules() {
     let job = compile_target(TARGET, Some(PRE), Some(POST)).unwrap().job;
     assert_eq!(job.schema_version, SchemaVersion::Current as i32);
+    assert_eq!(job.name, "STM32WLE5CC");
     let target = target_of(&job);
     assert_eq!(target.variant_name, "STM32WLE5CC");
+    assert_eq!(
+        target.cortex_m.as_ref().unwrap().firmware_sha256,
+        FIRMWARE_HASH
+    );
     assert!(target.esp32.is_none());
     assert_eq!(target.memory_map.len(), 3);
     assert_eq!(target.self_tests[0].addr, 0xffff_f006);
@@ -101,7 +142,9 @@ fn encoded_job_round_trips() {
 
 #[test]
 fn esp32_target_uses_defaults_and_control_pins() {
-    let job = compile_target(ESP32_TARGET, None, None).unwrap().job;
+    let job = compile_with(ESP32_TARGET, None, None, None, &esp32_images())
+        .unwrap()
+        .job;
     let target = target_of(&job);
     assert!(target.cortex_m.is_none());
     assert!(target.memory_map.is_empty());
@@ -112,6 +155,39 @@ fn esp32_target_uses_defaults_and_control_pins() {
     assert!(esp32.reset_assert_high);
     assert!(!esp32.boot_assert_high);
     assert_eq!(esp32.images[1].offset, 0x10000);
+    assert_eq!(esp32.images[0].sha256, BOOTLOADER_HASH);
+    assert_eq!(esp32.images[1].sha256, FIRMWARE_HASH);
+}
+
+#[test]
+fn every_programmed_image_must_be_pinned() {
+    let firmware_only = image_hashes(&[("firmware.bin", FIRMWARE_HASH)]);
+    let error = error_of(compile_with(ESP32_TARGET, None, None, None, &firmware_only));
+    assert!(error.contains("--image bootloader.bin="));
+    let error = error_of(compile_with(TARGET, None, None, None, &ImageHashes::new()));
+    assert!(error.contains("--image firmware.bin="));
+
+    let outside = ESP32_TARGET.replace("/data/bootloader.bin", "/sd/bootloader.bin");
+    let error = error_of(compile_with(&outside, None, None, None, &esp32_images()));
+    assert!(error.contains("/data/<name>"));
+
+    let compiled = compile_with(TARGET, None, None, None, &esp32_images()).unwrap();
+    assert_eq!(
+        compiled.warnings,
+        ["image 'bootloader.bin' is not used by this job"]
+    );
+}
+
+#[test]
+fn job_name_overrides_variant_and_is_bounded() {
+    let images = image_hashes(&[("firmware.bin", FIRMWARE_HASH)]);
+    let job = compile_with(TARGET, Some("line-a"), None, None, &images)
+        .unwrap()
+        .job;
+    assert_eq!(job.name, "line-a");
+    let long = "x".repeat(32);
+    let error = error_of(compile_with(TARGET, Some(&long), None, None, &images));
+    assert!(error.contains("job name"));
 }
 
 #[test]
