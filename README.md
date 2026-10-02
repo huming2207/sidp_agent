@@ -1,7 +1,9 @@
 # Soul Agent
 
 Rust host-side SIDP implementation for Soul Injector, with a checked SIDP v1
-codec, USB CDC session, stop snapshot cache and local GDB RSP server.
+codec, USB CDC session, stop snapshot cache and local GDB RSP server, plus the
+Soul Injector management commands: compiling and pushing programming jobs,
+running them, and collecting the production log.
 WebSocket and graphical UI support are outside this first milestone.
 
 ## Development
