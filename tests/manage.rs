@@ -150,7 +150,19 @@ fn run_result_is_matched_by_run_id() {
 #[test]
 fn asset_names_follow_device_rules() {
     assert!(manage::is_valid_asset_name("firmware-v1.2_a.bin"));
-    for name in ["", ".hidden", "a/b", "x.part", "x.sha256", &"a".repeat(32)] {
+    let too_long = "a".repeat(32);
+    let invalid = [
+        "",
+        ".hidden",
+        "a/b",
+        "x.part",
+        "JOB.PB",
+        "job.pb.",
+        "Firmware.bin",
+        "firmwa~1.bin",
+        &too_long,
+    ];
+    for name in invalid {
         assert!(!manage::is_valid_asset_name(name), "{name}");
     }
 }

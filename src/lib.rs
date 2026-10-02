@@ -7,5 +7,6 @@ pub mod compile;
 pub mod gdb;
 pub mod job;
 pub mod manage;
+pub mod ntp;
 pub mod session;
 pub mod transport;

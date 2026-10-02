@@ -80,8 +80,11 @@ New entries are appended as JSON Lines (`device`, `id`, `boot`, `uptime_us`,
 `utc_ms`, `type`, and for runs `run_id`, `outcome`, `failed_stage`,
 `duration_ms`, `trigger`, `job_name`, `job_sha256`, `error_code`), synced to
 disk, and only then acknowledged so the device may reuse the space. `log pull`,
-`job push` and `job run` set the device clock first, which gives entries their
-`utc_ms`. A device whose log is full refuses runs with `STATUS_LOG_FULL` (30)
+`job push` and `job run` first set the device clock, which gives entries their
+`utc_ms`. The time comes from an NTP server (`--ntp-server`, default
+`pool.ntp.org`), not from this computer's clock, so the device needs no network
+of its own. Without NTP the clock is left unset and a warning is printed. All
+times are UTC; convert to local time only when displaying them. A device whose log is full refuses runs with `STATUS_LOG_FULL` (30)
 until the log is pulled.
 
 `proto/*.proto` and `proto/*.options` are copies of Soul Injector's

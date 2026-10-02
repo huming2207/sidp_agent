@@ -52,6 +52,9 @@ pub const STAGED_JOB_NAME: &str = "job.pb.new";
 pub const FIRMWARE_NAME: &str = "firmware.bin";
 /// Directory the device stores assets in.
 pub const DEVICE_DIR: &str = "/data/";
+/// Rule for device file names, for error messages.
+pub const ASSET_NAME_RULE: &str =
+    "1-31 of a-z 0-9 . _ -, not starting or ending with '.', not ending in .part";
 /// Longest asset name the device accepts (nanopb max_size 32).
 pub const MAX_ASSET_NAME_LEN: usize = 31;
 /// Largest ASSET_WRITE data chunk that fits one SIDP frame.
@@ -63,16 +66,19 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 }
 
 /// Whether the device accepts `name` as an asset file name.
+///
+/// Lowercase only and no trailing dot: the device's FAT file system ignores
+/// case and trailing dots, so any other spelling would alias another file.
 pub fn is_valid_asset_name(name: &str) -> bool {
     let allowed = name
         .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'));
     !name.is_empty()
         && name.len() <= MAX_ASSET_NAME_LEN
         && !name.starts_with('.')
+        && !name.ends_with('.')
         && allowed
         && !name.ends_with(".part")
-        && !name.ends_with(".sha256")
 }
 
 /// Uploads `data` as asset `name` unless the device already holds it.

@@ -4,7 +4,9 @@
 //! pinned name has exactly the pinned hash.
 use super::{CompileError, Result};
 use crate::job::Job;
-use crate::manage::{DEVICE_DIR, FIRMWARE_NAME, STAGED_JOB_NAME, is_valid_asset_name};
+use crate::manage::{
+    ASSET_NAME_RULE, DEVICE_DIR, FIRMWARE_NAME, STAGED_JOB_NAME, is_valid_asset_name,
+};
 use std::collections::BTreeMap;
 
 /// Image hashes by device asset name, e.g. `firmware.bin`.
@@ -42,7 +44,7 @@ fn asset_name(path: &str) -> Result<&str> {
     let name = path.strip_prefix(DEVICE_DIR).unwrap_or("");
     if !is_valid_asset_name(name) || name == "job.pb" || name == STAGED_JOB_NAME {
         return Err(CompileError(format!(
-            "image path '{path}' must be {DEVICE_DIR}<name> with a plain file name"
+            "image path '{path}' must be {DEVICE_DIR}<name>, name: {ASSET_NAME_RULE}"
         )));
     }
     Ok(name)

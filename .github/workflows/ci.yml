@@ -40,7 +40,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: huming2207/sidp_client
-          ref: 8f764f17635d72688f15f73d0403543e3061c888
+          ref: 4f7921d5dbab49273e2720c53220c4fa056c115b
           path: sidp-client-fixture
       - name: Check schema copies match sidp_client
         run: |

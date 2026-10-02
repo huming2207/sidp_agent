@@ -5,19 +5,21 @@ use sidp_agent::compile::{self, ImageHashes, Sources};
 use sidp_agent::manage::{
     self, hex, proto::Outcome, proto::RunResult, proto::Stage, proto::Trigger,
 };
-use sidp_agent::{session::Session, transport::UsbCdc};
+use sidp_agent::{ntp, session::Session, transport::UsbCdc};
 use std::{
     error::Error,
     fs::OpenOptions,
     io::{BufWriter, Write},
     path::{Path, PathBuf},
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 type CommandResult = Result<(), Box<dyn Error>>;
 
 /// How often `job run --wait` polls the device.
 const RUN_POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// How long to wait for each NTP server address.
+const NTP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// USB CDC connection options shared by every device command.
 #[derive(Args)]
@@ -37,6 +39,9 @@ pub struct Connection {
     /// Skip DTR modem control for PTY testing only; real hardware requires DTR.
     #[arg(long)]
     no_dtr: bool,
+    /// NTP server that gives the device its UTC clock.
+    #[arg(long, default_value = ntp::DEFAULT_SERVER)]
+    ntp_server: String,
 }
 
 impl Connection {
@@ -91,7 +96,11 @@ fn read_image(spec: &str) -> Result<(String, Vec<u8>), Box<dyn Error>> {
         return Err(format!("--image '{spec}' must be NAME=FILE").into());
     };
     if !manage::is_valid_asset_name(name) {
-        return Err(format!("--image name '{name}' is not a valid device file name").into());
+        return Err(format!(
+            "--image name '{name}' is not a valid device file name ({})",
+            manage::ASSET_NAME_RULE
+        )
+        .into());
     }
     let data = std::fs::read(file).map_err(|e| format!("{file}: {e}"))?;
     Ok((name.to_owned(), data))
@@ -152,7 +161,9 @@ pub fn device_info(connection: &Connection) -> CommandResult {
         info.storage_free_kb, info.storage_total_kb
     );
     if info.log_full {
-        println!("Log:      full; runs are refused until `sidp-agent log pull`");
+        println!(
+            "Log:      runs refused; `sidp-agent log pull`, or restart the device if it still shows LOG ERROR"
+        );
     } else if info.log_newest_id > info.log_acked_id {
         println!("Log:      has entries not yet pulled");
     } else {
@@ -161,14 +172,21 @@ pub fn device_info(connection: &Connection) -> CommandResult {
     Ok(())
 }
 
-/// Sets the device clock from this computer so log entries get UTC times.
+/// Sets the device clock to UTC from the NTP server so log entries get UTC
+/// times. This computer's clock is not used: it may be wrong.
 ///
-/// Older firmware without SET_TIME, or a refused time, only costs the times.
-fn set_device_time(session: &mut Session<UsbCdc>) {
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |since| since.as_millis() as u64);
-    if let Err(error) = session.set_time(now) {
+/// Without NTP, older firmware without SET_TIME, or a refused time, entries
+/// only lose their UTC times; a later command can still set the clock.
+fn set_device_time(session: &mut Session<UsbCdc>, connection: &Connection) {
+    let server = &connection.ntp_server;
+    let time = match ntp::query(server, NTP_TIMEOUT) {
+        Ok(time) => time,
+        Err(error) => {
+            eprintln!("warning: cannot get the time from {server}: {error}; device clock not set");
+            return;
+        }
+    };
+    if let Err(error) = session.set_time(time.now_ms()) {
         eprintln!("warning: cannot set the device clock: {error}");
     }
 }
@@ -177,7 +195,7 @@ fn set_device_time(session: &mut Session<UsbCdc>) {
 /// Lines, then marks them collected unless `no_ack`.
 pub fn log_pull(connection: &Connection, output: &Path, no_ack: bool) -> CommandResult {
     let mut session = connection.open()?;
-    set_device_time(&mut session);
+    set_device_time(&mut session, connection);
     let info = session.device_info()?;
     let entries = manage::read_log(&mut session, info.log_acked_id)?;
     let Some(last) = entries.last() else {
@@ -214,7 +232,11 @@ pub fn asset_push(connection: &Connection, file: &Path, name: Option<&str>) -> C
     let file_name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let name = name.unwrap_or(file_name);
     if !manage::is_valid_asset_name(name) {
-        return Err(format!("'{name}' is not a valid device file name; use --name").into());
+        return Err(format!(
+            "'{name}' is not a valid device file name ({}); use --name",
+            manage::ASSET_NAME_RULE
+        )
+        .into());
     }
     let data = std::fs::read(file)?;
     let mut session = connection.open()?;
@@ -235,7 +257,7 @@ pub fn job_push(connection: &Connection, source: &JobSource, auto: bool) -> Comm
         Trigger::Manual
     };
     let mut session = connection.open()?;
-    set_device_time(&mut session);
+    set_device_time(&mut session, connection);
     manage::push_job(&mut session, &job.bytes, &job.images, trigger)?;
     println!(
         "Job '{}' active (sha256 {}), trigger {}",
@@ -249,7 +271,7 @@ pub fn job_push(connection: &Connection, source: &JobSource, auto: bool) -> Comm
 /// `job run`.
 pub fn job_run(connection: &Connection, wait: bool) -> CommandResult {
     let mut session = connection.open()?;
-    set_device_time(&mut session);
+    set_device_time(&mut session, connection);
     let run_id = session.job_run_once()?;
     println!("Run {run_id} started");
     if !wait {
