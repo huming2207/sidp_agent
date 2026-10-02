@@ -36,6 +36,22 @@ settling interval before ATTACH. An attach timeout means close/reopen manually;
 there is no readiness handshake in SIDP v1. DTR deassertion on close triggers
 the firmware's target cleanup. Host tests cannot validate physical USB timing.
 
+## Compiling programming jobs
+
+The firmware does not parse YAML. Compile the probe-rs style `target.yaml`
+and the optional pre/post procedure files into a job, then copy it to the
+device as `/data/job.pb`:
+
+```sh
+cargo run -- compile --target target.yaml --pre pre_prog.yaml --post post_prog.yaml -o job.pb
+```
+
+Use `--variant NAME` when `target.yaml` lists several variants. The compiler
+applies the checks the firmware parser used to make and the device's fixed
+size limits, so errors are reported on the host. `proto/job.proto` and
+`proto/job.options` are copies of Soul Injector's `sidp_client/proto`; CI
+checks they stay identical.
+
 ## CLI and GDB
 
 ```sh

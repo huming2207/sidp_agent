@@ -1,13 +1,19 @@
 //! Command-line USB SIDP to local GDB bridge. See `sidp-agent --help`.
 use clap::{Parser, Subcommand};
+use prost::Message;
+use sidp_agent::compile::{self, Sources};
 use sidp_agent::{session::Session, transport::UsbCdc};
 use std::{
     net::{SocketAddr, TcpListener},
+    path::{Path, PathBuf},
     time::Duration,
 };
 
 #[derive(Parser)]
-#[command(version, about = "Soul Injector USB SIDP to local GDB bridge")]
+#[command(
+    version,
+    about = "Soul Injector USB SIDP to local GDB bridge and job compiler"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -39,6 +45,24 @@ enum Command {
         /// Skip DTR modem control for PTY testing only; real hardware requires DTR.
         #[arg(long)]
         no_dtr: bool,
+    },
+    /// Compile target.yaml and optional procedure YAML into a job file.
+    Compile {
+        /// probe-rs style target description.
+        #[arg(long)]
+        target: PathBuf,
+        /// Variant to select when target.yaml lists several.
+        #[arg(long)]
+        variant: Option<String>,
+        /// Procedure run before target detection (pre_prog.yaml).
+        #[arg(long)]
+        pre: Option<PathBuf>,
+        /// Procedure run after self tests (post_prog.yaml).
+        #[arg(long)]
+        post: Option<PathBuf>,
+        /// Output job file; copy it to the device as /data/job.pb.
+        #[arg(short, long, default_value = "job.pb")]
+        output: PathBuf,
     },
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -75,6 +99,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let requests = sidp_agent::gdb::serve(listener, session, resume_on_detach)?;
             eprintln!("Detached; {requests} SIDP requests sent");
         }
+        Command::Compile {
+            target,
+            variant,
+            pre,
+            post,
+            output,
+        } => compile_job(
+            &target,
+            variant.as_deref(),
+            pre.as_deref(),
+            post.as_deref(),
+            &output,
+        )?,
     }
+    Ok(())
+}
+
+fn read_optional(path: Option<&Path>) -> std::io::Result<Option<String>> {
+    path.map(std::fs::read_to_string).transpose()
+}
+
+fn compile_job(
+    target: &Path,
+    variant: Option<&str>,
+    pre: Option<&Path>,
+    post: Option<&Path>,
+    output: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let target_text = std::fs::read_to_string(target)?;
+    let pre_text = read_optional(pre)?;
+    let post_text = read_optional(post)?;
+    let sources = Sources {
+        target: &target_text,
+        variant,
+        pre_program: pre_text.as_deref(),
+        post_program: post_text.as_deref(),
+    };
+    let compiled = compile::compile(&sources)?;
+    for warning in &compiled.warnings {
+        eprintln!("warning: {warning}");
+    }
+    let bytes = compiled.job.encode_to_vec();
+    std::fs::write(output, &bytes)?;
+    println!("Wrote {} ({} bytes)", output.display(), bytes.len());
     Ok(())
 }

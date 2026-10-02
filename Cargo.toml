@@ -2,7 +2,7 @@
 name = "sidp-agent"
 version = "0.1.0"
 edition = "2024"
-description = "USB SIDP to local GDB bridge for Soul Injector"
+description = "USB SIDP to local GDB bridge and job compiler for Soul Injector"
 publish = false
 license-file = "LICENSE.md"
 
@@ -11,7 +11,15 @@ gdbstub = "0.7.10"
 serialport = { version = "4.10", default-features = false }
 clap = { version = "4.6", features = ["derive"] }
 thiserror = "2"
+prost = "0.14"
+yaml_serde = "0.10"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
 
 [lints.rust]
 missing_docs = "warn"
 unsafe_code = "forbid"
+
+[build-dependencies]
+prost-build = "0.14"
+protox = "0.9"
