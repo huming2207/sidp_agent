@@ -4,10 +4,12 @@
 use super::*;
 use crate::manage::proto::{
     AssetBeginRequest, AssetBeginResponse, DeviceInfo, JobCancelRequest, JobRunOnceResponse,
-    JobSetRequest, JobStatus, Trigger,
+    JobSetRequest, JobStatus, LogAckRequest, LogReadRequest, LogReadResponse, SetTimeRequest,
+    Trigger,
 };
 use crate::manage::{
-    ASSET_BEGIN, ASSET_COMMIT, ASSET_WRITE, DEVICE_INFO, JOB_CANCEL, JOB_GET, JOB_RUN_ONCE, JOB_SET,
+    ASSET_BEGIN, ASSET_COMMIT, ASSET_WRITE, DEVICE_INFO, JOB_CANCEL, JOB_GET, JOB_RUN_ONCE,
+    JOB_SET, LOG_ACK, LOG_READ, SET_TIME,
 };
 use prost::Message;
 
@@ -80,5 +82,24 @@ impl<T: Transport> Session<T> {
     pub fn job_cancel(&mut self, run_id: u32) -> Result<()> {
         let request = JobCancelRequest { run_id };
         self.empty_request(JOB_CANCEL, request.encode_to_vec())
+    }
+
+    /// Sets the device clock for this boot; the device keeps the first time it gets.
+    pub fn set_time(&mut self, utc_ms: u64) -> Result<()> {
+        let request = SetTimeRequest { utc_ms };
+        self.empty_request(SET_TIME, request.encode_to_vec())
+    }
+
+    /// Production log entries after `after_id`, as many as fit one frame.
+    pub fn log_read(&mut self, after_id: u64) -> Result<LogReadResponse> {
+        let request = LogReadRequest { after_id };
+        let payload = self.request(LOG_READ, request.encode_to_vec())?;
+        self.decode_response(&payload)
+    }
+
+    /// Marks log entries up to `up_to_id` collected; the device may then overwrite them.
+    pub fn log_ack(&mut self, up_to_id: u64) -> Result<()> {
+        let request = LogAckRequest { up_to_id };
+        self.empty_request(LOG_ACK, request.encode_to_vec())
     }
 }

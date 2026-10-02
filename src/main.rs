@@ -58,6 +58,26 @@ enum Command {
         #[command(subcommand)]
         command: JobCommand,
     },
+    /// Collect the device's production log.
+    Log {
+        #[command(subcommand)]
+        command: LogCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum LogCommand {
+    /// Append new log entries to a JSON Lines file, then let the device reuse their space.
+    Pull {
+        #[command(flatten)]
+        connection: Connection,
+        /// File to append to; one JSON object per line.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Leave the entries uncollected on the device (they are pulled again next time).
+        #[arg(long)]
+        no_ack: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -160,6 +180,14 @@ fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 },
         } => commands::asset_push(&connection, &file, name.as_deref()),
         Command::Job { command } => run_job_command(command),
+        Command::Log {
+            command:
+                LogCommand::Pull {
+                    connection,
+                    output,
+                    no_ack,
+                },
+        } => commands::log_pull(&connection, &output, no_ack),
     }
 }
 

@@ -2,12 +2,16 @@
 use clap::Args;
 use prost::Message;
 use sidp_agent::compile::{self, ImageHashes, Sources};
-use sidp_agent::manage::{self, proto::Outcome, proto::RunResult, proto::Stage, proto::Trigger};
+use sidp_agent::manage::{
+    self, hex, proto::Outcome, proto::RunResult, proto::Stage, proto::Trigger,
+};
 use sidp_agent::{session::Session, transport::UsbCdc};
 use std::{
     error::Error,
+    fs::OpenOptions,
+    io::{BufWriter, Write},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 type CommandResult = Result<(), Box<dyn Error>>;
@@ -125,10 +129,6 @@ fn build_job(source: &JobSource) -> Result<BuiltJob, Box<dyn Error>> {
     })
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// `compile`: writes the job file without talking to a device.
 pub fn compile_job(source: &JobSource, output: &Path) -> CommandResult {
     let job = build_job(source)?;
@@ -151,6 +151,61 @@ pub fn device_info(connection: &Connection) -> CommandResult {
         "Storage:  {} KiB free of {} KiB",
         info.storage_free_kb, info.storage_total_kb
     );
+    if info.log_full {
+        println!("Log:      full; runs are refused until `sidp-agent log pull`");
+    } else if info.log_newest_id > info.log_acked_id {
+        println!("Log:      has entries not yet pulled");
+    } else {
+        println!("Log:      all entries pulled");
+    }
+    Ok(())
+}
+
+/// Sets the device clock from this computer so log entries get UTC times.
+///
+/// Older firmware without SET_TIME, or a refused time, only costs the times.
+fn set_device_time(session: &mut Session<UsbCdc>) {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64);
+    if let Err(error) = session.set_time(now) {
+        eprintln!("warning: cannot set the device clock: {error}");
+    }
+}
+
+/// `log pull`: appends new production log entries to `output` as JSON
+/// Lines, then marks them collected unless `no_ack`.
+pub fn log_pull(connection: &Connection, output: &Path, no_ack: bool) -> CommandResult {
+    let mut session = connection.open()?;
+    set_device_time(&mut session);
+    let info = session.device_info()?;
+    let entries = manage::read_log(&mut session, info.log_acked_id)?;
+    let Some(last) = entries.last() else {
+        println!("No new log entries");
+        return Ok(());
+    };
+
+    // The entries must be on disk before the device may overwrite them.
+    let file = OpenOptions::new().create(true).append(true).open(output)?;
+    let mut writer = BufWriter::new(file);
+    for entry in &entries {
+        writeln!(writer, "{}", manage::log_entry_json(&info.serial, entry))?;
+    }
+    writer
+        .into_inner()
+        .map_err(|e| e.into_error())?
+        .sync_all()?;
+
+    if no_ack {
+        println!(
+            "Wrote {} entries to {} (not acknowledged)",
+            entries.len(),
+            output.display()
+        );
+        return Ok(());
+    }
+    session.log_ack(last.id)?;
+    println!("Wrote {} entries to {}", entries.len(), output.display());
     Ok(())
 }
 
@@ -180,6 +235,7 @@ pub fn job_push(connection: &Connection, source: &JobSource, auto: bool) -> Comm
         Trigger::Manual
     };
     let mut session = connection.open()?;
+    set_device_time(&mut session);
     manage::push_job(&mut session, &job.bytes, &job.images, trigger)?;
     println!(
         "Job '{}' active (sha256 {}), trigger {}",
@@ -193,6 +249,7 @@ pub fn job_push(connection: &Connection, source: &JobSource, auto: bool) -> Comm
 /// `job run`.
 pub fn job_run(connection: &Connection, wait: bool) -> CommandResult {
     let mut session = connection.open()?;
+    set_device_time(&mut session);
     let run_id = session.job_run_once()?;
     println!("Run {run_id} started");
     if !wait {

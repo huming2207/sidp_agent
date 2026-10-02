@@ -66,6 +66,22 @@ or its files.
 applies the checks the firmware parser used to make and the device's fixed
 size limits, so errors are reported on the host.
 
+## Production log
+
+The device records every run and every boot until the log is collected:
+
+```sh
+cargo run -- log pull --port /dev/ttyACM0 --output production.jsonl [--no-ack]
+```
+
+New entries are appended as JSON Lines (`device`, `id`, `boot`, `uptime_us`,
+`utc_ms`, `type`, and for runs `run_id`, `outcome`, `failed_stage`,
+`duration_ms`, `trigger`, `job_name`, `job_sha256`, `error_code`), synced to
+disk, and only then acknowledged so the device may reuse the space. `log pull`,
+`job push` and `job run` set the device clock first, which gives entries their
+`utc_ms`. A device whose log is full refuses runs with `STATUS_LOG_FULL` (30)
+until the log is pulled.
+
 `proto/*.proto` and `proto/*.options` are copies of Soul Injector's
 `sidp_client/proto`; CI checks they stay identical. The management opcodes are
 documented in `sidp_client/docs/sidp-management.md`.
