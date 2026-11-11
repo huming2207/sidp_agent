@@ -3,13 +3,13 @@
 //!
 //! These need no device. They run against a state file in a temporary
 //! folder, never the user's settings.
-use gpui_kit::test::{TestAppContextExt, TestWindowExt};
+use gpui_kit::test::{TestAppContextExt, TestEventExt, TestWindowExt};
 use gpui_kit::{
-    AnyWindowHandle, AppContext, Bounds, Entity, Point, TestAppContext, Window, WindowBounds,
-    WindowOptions, px, size,
+    AnyWindowHandle, AppContext, Bounds, Entity, Modifiers, MouseButton, Point, ScrollDelta,
+    TestAppContext, Window, WindowBounds, WindowOptions, point, px, size,
 };
 use sidp_desktop::{
-    profile::{DEFAULT_GDB_PORT, State},
+    profile::{DEFAULT_GDB_PORT, Mode, State},
     snippets::Client,
     ui::app::{AppView, Readiness},
 };
@@ -28,12 +28,21 @@ fn fixture(name: &str) -> PathBuf {
 
 /// Opens the window tall enough that every section is on screen.
 fn open(cx: &mut TestAppContext, state_file: &Path) -> (AnyWindowHandle, Entity<AppView>) {
+    open_sized(cx, state_file, 2400.)
+}
+
+/// Opens the window `height` pixels tall.
+fn open_sized(
+    cx: &mut TestAppContext,
+    state_file: &Path,
+    height: f32,
+) -> (AnyWindowHandle, Entity<AppView>) {
     let state_file = state_file.to_path_buf();
     cx.update(|cx| {
         gpui_kit::init(cx);
         let bounds = Bounds {
             origin: Point::default(),
-            size: size(px(1200.), px(2400.)),
+            size: size(px(1200.), px(height)),
         };
         gpui_kit::open_window(
             WindowOptions {
@@ -59,6 +68,12 @@ fn replace(window: &mut Window, id: &str, text: &str, cx: &mut gpui_kit::App) {
         cx,
     );
     window.input(text, cx);
+}
+
+/// Clicks a mode card, as a user would.
+fn choose_mode(window: &mut Window, mode: Mode, cx: &mut gpui_kit::App) {
+    let index = Mode::ALL.iter().position(|m| *m == mode).unwrap();
+    window.click(("mode", index), cx);
 }
 
 fn path_text(path: &Path) -> String {
@@ -177,6 +192,7 @@ async fn an_invalid_gdb_port_is_not_used(cx: &mut TestAppContext) {
 
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
+        choose_mode(window, Mode::Debug, cx);
         replace(window, "gdb-port", "70000", cx);
     })
     .unwrap();
@@ -203,6 +219,11 @@ async fn an_invalid_gdb_port_is_not_used(cx: &mut TestAppContext) {
 async fn the_debugger_tabs_switch_settings(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (window, view) = open(cx, &dir.path().join("state.json"));
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        choose_mode(window, Mode::Debug, cx);
+    })
+    .unwrap();
     for (index, client) in Client::ALL.into_iter().enumerate().rev() {
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
@@ -276,4 +297,242 @@ async fn esp32_targets_ask_for_each_image_and_cannot_be_debugged(cx: &mut TestAp
         let blocker = view.debug_blocker(cx).unwrap_or_default();
         assert!(blocker.contains("ESP32"), "{blocker}");
     });
+}
+
+#[gpui_kit::test]
+async fn each_mode_shows_its_own_page(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state_file = dir.path().join("state.json");
+    let (window, view) = open(cx, &state_file);
+    // (mode, a control only its page has)
+    let pages = [
+        (Mode::Program, "program"),
+        (Mode::Debug, "debug"),
+        (Mode::Power, "power-start"),
+    ];
+    for (mode, _) in [Mode::Debug, Mode::Power, Mode::Program]
+        .into_iter()
+        .map(|m| pages.into_iter().find(|(p, _)| *p == m).unwrap())
+    {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            choose_mode(window, mode, cx);
+            for (other, other_control) in pages {
+                assert_eq!(
+                    window.try_find(other_control).is_some(),
+                    other == mode,
+                    "{other_control} on the {mode:?} page"
+                );
+            }
+        })
+        .unwrap();
+        cx.update(|cx| assert_eq!(view.read(cx).mode(), mode));
+    }
+    // The page is remembered.
+    cx.update_window(window, |_, window, cx| choose_mode(window, Mode::Power, cx))
+        .unwrap();
+    cx.wait_for(window, WAIT, |_, _| {
+        State::load(&state_file).is_ok_and(|s| s.mode == Mode::Power)
+    })
+    .await;
+}
+
+/// Runs the UI until `done`, in real time: a capture produces samples on
+/// its own thread.
+fn run_until(
+    cx: &mut TestAppContext,
+    view: &Entity<AppView>,
+    mut done: impl FnMut(&sidp_desktop::ui::power::PowerView) -> bool,
+) {
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        // Let the capture thread work, then let the view's timer collect.
+        std::thread::sleep(Duration::from_millis(20));
+        cx.executor().advance_clock(Duration::from_millis(50));
+        cx.run_until_parked();
+        if cx.update(|cx| done(view.read(cx).power().read(cx))) {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "timed out");
+    }
+}
+
+#[gpui_kit::test]
+async fn the_simulated_preview_records_until_stopped(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, view) = open(cx, &dir.path().join("state.json"));
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        choose_mode(window, Mode::Power, cx);
+        window.within("power-source").click(1usize, cx);
+        window.click("power-start", cx);
+    })
+    .unwrap();
+    run_until(cx, &view, |power| power.recording().len() >= 300);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("power-start", cx);
+    })
+    .unwrap();
+    run_until(cx, &view, |power| !power.is_capturing());
+    cx.update(|cx| {
+        let power = view.read(cx).power().read(cx);
+        assert_eq!(power.error(), None);
+        let recording = power.recording();
+        let stats = recording.stats(0.0, recording.duration()).unwrap();
+        assert!(stats.average > 0.0 && stats.max >= stats.min);
+    });
+}
+
+#[gpui_kit::test]
+async fn the_soul_injector_source_explains_it_is_not_ready(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, view) = open(cx, &dir.path().join("state.json"));
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        choose_mode(window, Mode::Power, cx);
+        window.click("power-start", cx);
+    })
+    .unwrap();
+    run_until(cx, &view, |power| !power.is_capturing());
+    cx.update(|cx| {
+        let error = view
+            .read(cx)
+            .power()
+            .read(cx)
+            .error()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(error.contains("not available yet"), "{error}");
+    });
+}
+
+#[gpui_kit::test]
+async fn power_can_be_measured_while_debugging(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, view) = open(cx, &dir.path().join("state.json"));
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        choose_mode(window, Mode::Debug, cx);
+        assert!(window.try_find("power-start").is_none());
+        window.click("measure-power", cx);
+        window.render_frame(cx);
+        // The compact power view appears on the Debug page.
+        assert!(window.try_find("power-start").is_some());
+        assert!(window.try_find("power-rate").is_none());
+    })
+    .unwrap();
+    cx.update(|cx| assert!(view.read(cx).state().profile().debug.measure_power));
+}
+
+#[gpui_kit::test]
+async fn the_chart_zooms_pans_and_selects_like_the_power_profiler(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    // Short enough that the page scrolls, as in a normal window: the chart
+    // must still get the wheel.
+    let (window, view) = open_sized(cx, &dir.path().join("state.json"), 900.);
+    let power = cx.update(|cx| view.read(cx).power().clone());
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        choose_mode(window, Mode::Power, cx);
+    })
+    .unwrap();
+    cx.update(|cx| {
+        power.update(cx, |power, cx| {
+            power.show_recording(sidp_desktop::power::simulated_recording(1000, 30.0), cx)
+        })
+    });
+    let shown = |cx: &mut TestAppContext| cx.update(|cx| power.read(cx).window());
+    assert_eq!(shown(cx), (20.0, 30.0));
+
+    // The page does scroll when the wheel is elsewhere...
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let before = window.find("power-chart").bounds();
+        window.scroll("power-start", ScrollDelta::Lines(point(0., -2.)), cx);
+        window.render_frame(cx);
+        let after = window.find("power-chart").bounds();
+        assert!(after.origin.y < before.origin.y, "the page should scroll");
+        window.scroll("power-start", ScrollDelta::Lines(point(0., 2.)), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    assert_eq!(shown(cx), (20.0, 30.0));
+
+    // ...but over the chart, scrolling up zooms in around the pointer (the
+    // centre) and leaves the page where it is.
+    cx.update_window(window, |_, window, cx| {
+        let before = window.find("power-chart").bounds();
+        window.scroll("power-chart", ScrollDelta::Lines(point(0., 3.)), cx);
+        window.render_frame(cx);
+        assert_eq!(
+            window.find("power-chart").bounds(),
+            before,
+            "the page moved"
+        );
+    })
+    .unwrap();
+    let (from, to) = shown(cx);
+    assert!(
+        (to - from - 10.0 / 1.2f64.powi(3)).abs() < 0.05,
+        "{from}..{to}"
+    );
+    assert!(((from + to) / 2.0 - 25.0).abs() < 0.1, "{from}..{to}");
+
+    // Scrolling down far enough shows the whole recording.
+    cx.update_window(window, |_, window, cx| {
+        window.scroll("power-chart", ScrollDelta::Lines(point(0., -40.)), cx);
+    })
+    .unwrap();
+    assert_eq!(shown(cx), (0.0, 30.0));
+
+    // Dragging to the right moves back in time and stops following.
+    cx.update_window(window, |_, window, cx| {
+        window.within("power-span").click(3usize, cx); // 10 s
+        window.render_frame(cx);
+        let chart = window.find("power-chart").bounds();
+        let start = chart.center();
+        window.pointer_down(start, MouseButton::Left, cx);
+        window.pointer_move(
+            start + point(chart.size.width / 4., px(0.)),
+            Some(MouseButton::Left),
+            cx,
+        );
+        window.pointer_up(
+            start + point(chart.size.width / 4., px(0.)),
+            MouseButton::Left,
+            cx,
+        );
+    })
+    .unwrap();
+    let (from, to) = shown(cx);
+    assert!((to - from - 10.0).abs() < 1e-6, "{from}..{to}");
+    assert!((from - 17.5).abs() < 0.1, "{from}..{to}");
+    cx.update(|cx| assert_eq!(power.read(cx).selection(), None));
+
+    // Shift-drag selects instead.
+    cx.update_window(window, |_, window, cx| {
+        let chart = window.find("power-chart").bounds();
+        let start = chart.center();
+        let end = start + point(chart.size.width / 5., px(0.));
+        window.change_modifiers(Modifiers::shift(), cx);
+        window.pointer_down(start, MouseButton::Left, cx);
+        window.pointer_move(end, Some(MouseButton::Left), cx);
+        window.pointer_up(end, MouseButton::Left, cx);
+        window.change_modifiers(Modifiers::default(), cx);
+    })
+    .unwrap();
+    let (window_from, window_to) = shown(cx);
+    assert_eq!(
+        (window_from, window_to),
+        (from, to),
+        "selecting does not pan"
+    );
+    let selection = cx
+        .update(|cx| power.read(cx).selection())
+        .expect("a selection");
+    assert!(
+        (selection.1 - selection.0 - 2.0).abs() < 0.1,
+        "{selection:?}"
+    );
 }

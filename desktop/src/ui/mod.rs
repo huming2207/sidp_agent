@@ -5,7 +5,10 @@
 //! the native menu bar.
 mod activity;
 pub mod app;
+mod assets;
 mod main_panel;
+mod modes;
+pub mod power;
 mod settings;
 mod sidebar;
 mod widgets;
@@ -15,9 +18,9 @@ use app::AppView;
 use gpui_kit::component::{ActiveTheme as _, TitleBar, h_flex, scroll::ScrollableElement, v_flex};
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Decorations, Entity, FontWeight,
-    IntoElement, KeyBinding, Menu, MenuItem, ParentElement, Render, Styled, TitlebarOptions,
-    Window, WindowBounds, WindowDecorations, WindowKind, WindowOptions, div,
-    prelude::FluentBuilder as _, px, size,
+    InteractiveElement as _, IntoElement, KeyBinding, Menu, MenuItem, ParentElement, Render,
+    StatefulInteractiveElement as _, Styled, TitlebarOptions, Window, WindowBounds,
+    WindowDecorations, WindowKind, WindowOptions, div, prelude::FluentBuilder as _, px, size,
 };
 
 mod menu_actions {
@@ -29,7 +32,7 @@ use menu_actions::{OpenSettings, Quit, ToggleTheme};
 /// Opens the main window and runs until it is closed.
 pub fn run() {
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(assets::AppAssets)
         .run(|cx: &mut App| {
             gpui_kit::init(cx);
             cx.on_window_closed(|cx, _| {
@@ -112,6 +115,7 @@ impl Render for AppView {
         // Where the system cannot draw a title bar (GNOME on Wayland), draw
         // a plain one so the window can still be moved and closed.
         let own_title_bar = matches!(window.window_decorations(), Decorations::Client { .. });
+        let mode_bar = self.render_mode_bar(cx);
         let sidebar = self.render_sidebar(window, cx);
         let main = self.render_main(window, cx);
         let activity = self.render_activity(window, cx);
@@ -143,13 +147,28 @@ impl Render for AppView {
                             .flex_1()
                             .min_w_0()
                             .h_full()
+                            .child(mode_bar)
                             .child(
                                 div()
                                     .flex_1()
                                     .min_h_0()
                                     .w_full()
                                     .bg(canvas)
-                                    .child(v_flex().size_full().overflow_y_scrollbar().child(main)),
+                                    // A plain scroll area: wheel events reach
+                                    // the innermost element first, so the
+                                    // power chart can zoom instead of the
+                                    // page scrolling. (GPUI Kit's Scrollable
+                                    // takes the wheel before its children.)
+                                    .relative()
+                                    .child(
+                                        div()
+                                            .id("page")
+                                            .size_full()
+                                            .overflow_y_scroll()
+                                            .track_scroll(&self.page_scroll)
+                                            .child(main),
+                                    )
+                                    .vertical_scrollbar(&self.page_scroll),
                             )
                             .child(activity),
                     ),

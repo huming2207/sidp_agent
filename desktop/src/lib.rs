@@ -9,6 +9,7 @@
 pub mod describe;
 pub mod platform;
 pub mod ports;
+pub mod power;
 pub mod profile;
 pub mod snippets;
 pub mod target;

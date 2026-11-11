@@ -1,10 +1,12 @@
-//! The main column: target, debug server, debugger and programming.
+//! The main column: one page per mode. Program has the target and the
+//! programming controls; Debug has the target, the debug server and the
+//! debugger settings; Power has the power measurement.
 use super::{
     app::{Activity, AppView, PathField, Readiness},
     widgets::{code_block, dot, field, notice, path_input, section},
 };
 use crate::{
-    profile::DebugMode,
+    profile::{DebugMode, Mode},
     snippets::Client,
     target::Family,
     worker::{GdbState, Level},
@@ -33,18 +35,22 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // ESP32 targets cannot be debugged, so only programming is shown.
-        let debuggable = self.family() != Some(Family::Esp32);
-        let target = self.render_target(window, cx);
-        let (debug, debugger) = if debuggable {
-            (
-                Some(self.render_debug(window, cx)),
-                Some(self.render_debugger(window, cx)),
-            )
-        } else {
-            (None, None)
+        let sections: Vec<AnyElement> = match self.state.mode {
+            Mode::Program => vec![
+                self.render_target(Mode::Program, window, cx),
+                self.render_programming(window, cx),
+            ],
+            Mode::Debug if self.family() == Some(Family::Esp32) => vec![
+                self.render_target(Mode::Debug, window, cx),
+                self.render_esp32_cannot_debug(cx),
+            ],
+            Mode::Debug => vec![
+                self.render_target(Mode::Debug, window, cx),
+                self.render_debug(window, cx),
+                self.render_debugger(window, cx),
+            ],
+            Mode::Power => vec![self.render_power_page(cx)],
         };
-        let programming = self.render_programming(if debuggable { 4 } else { 2 }, window, cx);
         h_flex()
             .w_full()
             .justify_center()
@@ -55,12 +61,13 @@ impl AppView {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .max_w(px(860.))
+                    .max_w(px(if self.state.mode == Mode::Power {
+                        1100.
+                    } else {
+                        860.
+                    }))
                     .gap_5()
-                    .child(target)
-                    .children(debug)
-                    .children(debugger)
-                    .child(programming),
+                    .children(sections),
             )
             .into_any_element()
     }
@@ -76,7 +83,7 @@ impl AppView {
         }
     }
 
-    fn render_target(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_target(&mut self, mode: Mode, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let busy = self.is_busy();
         let summary = self.summary.as_ref().and_then(|s| s.as_ref().ok());
         let needs_variant = summary.is_some_and(|s| s.needs_variant_choice());
@@ -144,7 +151,7 @@ impl AppView {
             ));
         }
 
-        if !is_esp32 {
+        if mode == Mode::Debug && !is_esp32 {
             body = body.child(field(
                 "Debug symbols",
                 Some(
@@ -224,7 +231,12 @@ impl AppView {
 
         body = body.child(div().pt_1().child(self.render_readiness(cx)));
 
-        section(1, "Target", "What you are programming and debugging.", cx)
+        let subtitle = if mode == Mode::Debug {
+            "The firmware you are debugging, and the chip it runs on."
+        } else {
+            "The firmware to program, and the chip it goes on."
+        };
+        section(1, "Target", subtitle, cx)
             .child(body)
             .into_any_element()
     }
@@ -273,7 +285,7 @@ impl AppView {
             .small()
             .selected_index(mode_index)
             .child(Tab::new().label("Program, then debug"))
-            .child(Tab::new().label("Attach to running target"))
+            .child(Tab::new().label("Debug only"))
             .when(!locked, |this| {
                 this.on_click(cx.listener(|this, index: &usize, _, cx| {
                     this.set_debug_option(cx, |o| {
@@ -287,7 +299,7 @@ impl AppView {
             });
         let mode_help: SharedString = match options.mode {
             DebugMode::ProgramThenDebug => "Programs the target with the image above, then stops it at its first instruction.".into(),
-            DebugMode::Attach => "Stops the target wherever it is, without programming. The Soul Injector must already hold this target's job.".into(),
+            DebugMode::Attach => "Stops the target wherever it is, without programming it. The Soul Injector must already hold this target's job.".into(),
         };
 
         let switches = v_flex()
@@ -370,6 +382,21 @@ impl AppView {
                 .gap_3()
                 .child(field("Start", Some(mode_help), h_flex().child(mode), cx))
                 .child(field(
+                    "Power",
+                    None,
+                    Switch::new("measure-power")
+                        .small()
+                        .checked(options.measure_power)
+                        .disabled(locked)
+                        .label("Measure power during the session")
+                        .tooltip("Records the target's current while you debug. Starts and stops with the debug server.")
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            let checked = *checked;
+                            this.set_debug_option(cx, |o| o.measure_power = checked);
+                        })),
+                    cx,
+                ))
+                .child(field(
                     "GDB port",
                     None,
                     v_flex()
@@ -399,8 +426,61 @@ impl AppView {
                         .pt_1()
                         .child(button)
                         .child(div().flex_1().min_w_0().child(status)),
-                ),
+                )
+                .when(options.measure_power, |this| {
+                    this.child(
+                        v_flex()
+                            .gap_3()
+                            .pt_3()
+                            .border_t_1()
+                            .border_color(cx.theme().border)
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                    .child("Power during the session"),
+                            )
+                            .child(self.power.clone()),
+                    )
+                }),
         )
+        .into_any_element()
+    }
+
+    /// Shown in Debug mode for targets that cannot be debugged.
+    fn render_esp32_cannot_debug(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        section(
+            2,
+            "Debugging is not available",
+            "ESP32 targets are programmed over UART. Debugging through the Soul Injector needs an ARM Cortex-M target on SWD.",
+            cx,
+        )
+        .child(
+            h_flex().child(
+                Button::new("switch-to-program")
+                    .outline()
+                    .icon(IconName::ArrowRight)
+                    .label("Program this target instead")
+                    .on_click(cx.listener(|this, _, _, cx| this.set_mode(Mode::Program, cx))),
+            ),
+        )
+        .into_any_element()
+    }
+
+    /// The Power page: wiring, capture and the chart.
+    fn render_power_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        section(
+            None,
+            "Power",
+            "The Soul Injector measures the current your target draws from its supply, from nanoamps to amps.",
+            cx,
+        )
+        .child(notice(
+            Level::Info,
+            "Wiring: feed VPP input (connector pin 11) from 3.3 V (pin 7) or a 1.8 to 3.6 V bench supply, and power the target from VPP output (pin 9). The target is powered whenever VPP input is.",
+            cx,
+        ))
+        .child(self.power.clone())
         .into_any_element()
     }
 
@@ -592,12 +672,7 @@ impl AppView {
         .into_any_element()
     }
 
-    fn render_programming(
-        &mut self,
-        number: usize,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_programming(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let busy = self.is_busy();
         let ready = matches!(self.readiness, Readiness::Ready(_));
         let blocked = busy || !ready || self.device_blocker().is_some();
@@ -611,23 +686,15 @@ impl AppView {
             None
         };
 
-        let esp32 = self.family() == Some(Family::Esp32);
         section(
-            number,
-            "Programming",
-            "Program without debugging. The Soul Injector keeps the job and can program targets on its own.",
+            2,
+            "Program",
+            "The Soul Injector stores the job, so it can also program targets on its own, without this computer.",
             cx,
         )
         .child(
             v_flex()
                 .gap_3()
-                .when(esp32, |this| {
-                    this.child(notice(
-                        Level::Info,
-                        "ESP32 targets are programmed over UART. Debugging through the Soul Injector is available for Cortex-M targets only.",
-                        cx,
-                    ))
-                })
                 .child(
                     Switch::new("auto-run")
                         .small()

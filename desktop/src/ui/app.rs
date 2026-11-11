@@ -1,9 +1,10 @@
 //! State and behavior of the main window. Rendering is in the sibling
 //! modules; this one decides what happens.
+use super::power::PowerView;
 use crate::{
     platform,
     ports::{self, Port},
-    profile::{DebugMode, Profile, State},
+    profile::{DebugMode, Mode, Profile, State},
     snippets::{self, Client, DebugTarget},
     target::{self, BuiltJob, Family, TargetSummary},
     toolchain::{self, Gdb},
@@ -154,11 +155,15 @@ pub struct AppView {
     pub(super) gdbs: Vec<Gdb>,
     pub(super) gdbs_scanned: bool,
 
+    pub(super) power: Entity<PowerView>,
+    /// The power capture was started with the debug session.
+    power_with_debug: bool,
     worker: Option<Worker>,
     pub(super) running: Option<Running>,
     pub(super) gdb_state: GdbState,
     pub(super) log: VecDeque<LogLine>,
     pub(super) log_scroll: gpui_kit::ScrollHandle,
+    pub(super) page_scroll: gpui_kit::ScrollHandle,
     pub(super) show_log: bool,
     pub(super) show_more: bool,
     pub(super) client: Client,
@@ -239,11 +244,14 @@ impl AppView {
             device_error: None,
             gdbs: Vec::new(),
             gdbs_scanned: false,
+            power: cx.new(PowerView::new),
+            power_with_debug: false,
             worker: None,
             running: None,
             gdb_state: GdbState::Idle,
             log: VecDeque::new(),
             log_scroll: gpui_kit::ScrollHandle::new(),
+            page_scroll: gpui_kit::ScrollHandle::new(),
             show_log: false,
             show_more: false,
             client: Client::Gdb,
@@ -252,6 +260,19 @@ impl AppView {
             _subscriptions: Vec::new(),
         };
 
+        let compact = this.state.mode == Mode::Debug;
+        this.power
+            .update(cx, |power, cx| power.set_compact(compact, cx));
+        // The mode bar shows whether power is being measured.
+        let mut capturing = false;
+        this._subscriptions
+            .push(cx.observe(&this.power, move |_, power, cx| {
+                let now = power.read(cx).is_capturing();
+                if now != capturing {
+                    capturing = now;
+                    cx.notify();
+                }
+            }));
         this.subscribe(window, cx);
         this.load_profile(window, cx);
         this.load_settings(window, cx);
@@ -286,8 +307,8 @@ impl AppView {
         this._tasks.extend([events_task, ports_task]);
         this.scan_gdbs(window, cx);
 
-        this._subscriptions.push(cx.on_app_quit(|this, _| {
-            this.shut_down();
+        this._subscriptions.push(cx.on_app_quit(|this, cx| {
+            this.shut_down(cx);
             async {}
         }));
         this._subscriptions
@@ -318,6 +339,28 @@ impl AppView {
     /// Device names of the image fields shown.
     pub fn image_names(&self) -> Vec<&str> {
         self.image_inputs.iter().map(|i| i.name.as_str()).collect()
+    }
+
+    /// The page shown.
+    pub fn mode(&self) -> Mode {
+        self.state.mode
+    }
+
+    /// The power measurement.
+    pub fn power(&self) -> &Entity<PowerView> {
+        &self.power
+    }
+
+    /// Shows another page.
+    pub fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        if self.state.mode == mode {
+            return;
+        }
+        self.state.mode = mode;
+        self.power
+            .update(cx, |power, cx| power.set_compact(mode == Mode::Debug, cx));
+        self.save_soon(cx);
+        cx.notify();
     }
 
     /// The debugger whose settings are shown.
@@ -1000,6 +1043,7 @@ impl AppView {
         }
         let Some(port) = self.selected_port().map(|p| p.path.clone()) else {
             self.running = None;
+            self.end_power_with_debug(cx);
             self.add_log(Level::Error, "No Soul Injector is connected");
             cx.notify();
             return;
@@ -1051,9 +1095,13 @@ impl AppView {
                 let cancelled = this.running.as_ref().is_some_and(|r| r.stopping);
                 this.running = None;
                 match job {
-                    Ok(_) if cancelled => cx.notify(),
+                    Ok(_) if cancelled => {
+                        this.end_power_with_debug(cx);
+                        cx.notify();
+                    }
                     Ok(job) => this.start(activity, make(job), cx),
                     Err(problem) => {
+                        this.end_power_with_debug(cx);
                         this.report_failure(activity, problem, window, cx);
                         cx.notify();
                     }
@@ -1082,6 +1130,10 @@ impl AppView {
             return;
         }
         let options = self.state.profile().debug.clone();
+        if options.measure_power && !self.is_busy() {
+            self.power.update(cx, |power, cx| power.start(cx));
+            self.power_with_debug = true;
+        }
         let plan = move |program: Option<BuiltJob>| DebugPlan {
             program,
             port: options.port,
@@ -1175,6 +1227,9 @@ impl AppView {
         let activity = self.running.take().map(|r| r.activity);
         self.worker = None;
         self.gdb_state = GdbState::Idle;
+        if activity == Some(Activity::Debug) {
+            self.end_power_with_debug(cx);
+        }
         let Some(activity) = activity else {
             return;
         };
@@ -1207,8 +1262,16 @@ impl AppView {
         }
     }
 
+    /// Stops a power capture that was started with the debug session.
+    fn end_power_with_debug(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.power_with_debug) {
+            self.power.update(cx, |power, cx| power.stop(cx));
+        }
+    }
+
     /// Stops the running operation and saves, before the app exits.
-    fn shut_down(&mut self) {
+    fn shut_down(&mut self, cx: &mut Context<Self>) {
+        self.power.update(cx, |power, cx| power.stop(cx));
         if let Some(worker) = self.worker.take() {
             worker.shut_down(Duration::from_secs(3));
         }

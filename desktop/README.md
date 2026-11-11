@@ -33,29 +33,61 @@ its command-line tools.
 
 ## Using it
 
-The window has the Soul Injector and your profiles on the left, and four steps
-on the right:
+The Soul Injector and your saved profiles are on the left. Across the top,
+three cards choose what you want to do. Each has its own page, and a dot on
+a card shows that something is running there.
 
-1. **Target**: the `target.yaml`, the firmware image (`.bin`) and the ELF with
-   debug symbols. The app checks the files as you go and says what is missing.
-   Pre/post-program procedures and the job name are under
+**Program** puts firmware on targets, which is what the Soul Injector was
+first built for.
+
+1. *Target*: the `target.yaml` and the firmware image (`.bin`); for ESP32
+   targets, one file per image. The app checks the files as you go and says
+   what is missing. Pre/post-program procedures and the job name are under
    *Production options*.
-2. **Debug server**: *Program, then debug* sends the job, programs the target
-   and halts it at its first instruction, like `sidp-agent debug`.
-   *Attach to running target* is like `sidp-agent gdb`. *Connect under reset*
-   and *Let the target run when GDB detaches* match the CLI options.
-   *Keep serving after GDB disconnects* waits for the next GDB session, for
-   example when an IDE restarts debugging; in *Program, then debug* mode each
-   new session starts from reset without programming again.
-3. **Connect your debugger**: the GDB command line and ready-made settings for
-   VS Code (Microsoft C/C++ and Cortex-Debug) and CLion, with the paths and
-   port filled in. ARM GDBs are found in `PATH` and the usual toolchain
-   folders. On Linux and macOS, *Open in terminal* starts GDB already connected.
-4. **Programming**: program without debugging, or only send the job. The
-   switch makes the Soul Injector program every target plugged into it.
+2. *Program*: program now, or only send the job. The switch makes the Soul
+   Injector program every target plugged into it, without this computer.
 
-ESP32 targets cannot be debugged through the Soul Injector, so for them only
-the target and programming steps are shown.
+**Debug** turns the Soul Injector into a GDB server, like `sidp-agent debug`
+and `sidp-agent gdb`.
+
+1. *Target*: as above, plus the ELF with debug symbols.
+2. *Debug server*: *Program, then debug* programs the target and stops it at
+   its first instruction; *Debug only* stops it wherever it is. *Measure
+   power during the session* adds a compact power view that starts and stops
+   with the debug server. The options match the CLI's: connect under reset,
+   resume on detach, and keep serving after GDB disconnects (for IDEs that
+   restart debugging; in *Program, then debug* each new session starts from
+   reset without programming again).
+3. *Connect your debugger*: the GDB command line and settings for VS Code
+   (Microsoft C/C++ and Cortex-Debug) and CLion, with paths and port filled
+   in. ARM GDBs are found in `PATH` and the usual toolchain folders.
+
+ESP32 targets cannot be debugged through the Soul Injector; the Debug page
+says so and offers to program them instead.
+
+**Power** measures the target's current over time, in the style of Nordic's
+Power Profiler. The Soul Injector does not supply or switch target power:
+feed VPP input (connector pin 11) from 3.3 V (pin 7) or a 1.8 to 3.6 V bench
+supply, and power the target from VPP output (pin 9).
+
+- Choose the sample rate and how long to record, then *Start*.
+- The chart shows current on a log or linear scale. As in the Power
+  Profiler, the mouse wheel zooms time around the pointer, dragging pans
+  (and stops following new samples; *Back to newest* resumes), and sideways
+  scrolling pans too. The buttons jump to windows from 10 ms to the whole
+  recording. The strip under the chart shows which current range (LOW, MID,
+  HIGH) each part was measured in.
+- Shift-drag across the chart to select part of it. *Window* and *Selection*
+  show average, maximum and minimum current, charge, energy and duration.
+- *Export CSV* saves the selection, or everything, as
+  `time_s,current_a,supply_v,range`.
+
+The power protocol between the PC and the Soul Injector is not designed yet,
+so *Measure from: Soul Injector* explains that and stops. *Simulated preview*
+generates a low-power MCU's waveform (a few µA asleep, wake-ups and radio
+bursts) so the page can be tried; it is labelled as simulated wherever it is
+shown. The sample rates offered are placeholders until the protocol fixes
+them, and *Zero offset* is shown but disabled until then.
 
 The left column shows the device's serial number, firmware, storage, job and
 last result, and pulls the production log (appended as JSON Lines to the file
@@ -63,9 +95,9 @@ chosen in Settings). The Soul Injector is found by its USB product name, and
 plugging or unplugging it is noticed within two seconds.
 
 Settings (time server, timeouts, log file) are under the app menu on macOS
-(⌘,) and at the bottom of the sidebar on Linux (Ctrl+,). Profiles and settings
-are saved in `~/.config/soul-agent/state.json` on Linux and
-`~/Library/Application Support/Soul Agent/state.json` on macOS.
+(⌘,) and at the bottom of the sidebar on Linux (Ctrl+,). Profiles, settings
+and the last page used are saved in `~/.config/soul-agent/state.json` on Linux
+and `~/Library/Application Support/Soul Agent/state.json` on macOS.
 
 ### Troubleshooting
 
@@ -93,6 +125,7 @@ without a display:
 | `snippets` | GDB, VS Code and CLion settings for the running server. |
 | `worker` | Runs one device operation at a time on a background thread and reports events. |
 | `worker::bridge` | Puts `sidp_agent::gdb::serve` behind a loopback relay so the app can see GDB connect and can stop a session. |
+| `power` | Power recordings: statistics, chart envelopes, CSV export, and capture sources (the device, and the simulated preview). |
 | `describe` | Plain-language text for device statuses and run results. |
 | `platform` | Everything that differs between operating systems. |
 | `ui` | The GPUI Kit views. `ui::app` holds state and behavior; the rest only draws. |
@@ -117,9 +150,10 @@ cargo test
 
 `tests/ui.rs` drives the real window headless with GPUI Kit's test support:
 it clicks buttons, types into fields and picks variants with the keyboard, then
-checks the result, for example that a filled-in target becomes a ready job and
-is saved, that deleting a profile asks first, and that an invalid GDB port is
-not used. These tests use a temporary state file, never your settings.
+checks the result: for example that each mode shows only its own page, that a
+filled-in target becomes a ready job and is saved, that deleting a profile
+asks first, that an invalid GDB port is not used, and that the simulated power
+preview records until stopped. These tests use a temporary state file, never your settings.
 
 The debug-session tests drive the worker against Soul Injector's real C++
 SIDP session (the same mock endpoint as the CLI's end-to-end tests), with the

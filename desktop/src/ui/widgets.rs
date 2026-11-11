@@ -17,14 +17,15 @@ use crate::worker::Level;
 /// Width of the label column in forms.
 const LABEL_WIDTH: f32 = 168.;
 
-/// A numbered card with a title and a one-line explanation.
+/// A card with an optional step number, a title and a one-line explanation.
 pub fn section(
-    number: usize,
+    number: impl Into<Option<usize>>,
     title: &'static str,
     subtitle: impl Into<SharedString>,
     cx: &App,
 ) -> Div {
     let theme = cx.theme();
+    let number = number.into();
     v_flex()
         .w_full()
         .min_w_0()
@@ -39,21 +40,23 @@ pub fn section(
             h_flex()
                 .gap_3()
                 .items_start()
-                .child(
-                    div()
-                        .flex_none()
-                        .mt(px(1.))
-                        .size(px(22.))
-                        .rounded_full()
-                        .bg(theme.secondary)
-                        .text_color(theme.secondary_foreground)
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(number.to_string()),
-                )
+                .when_some(number, |this, number| {
+                    this.child(
+                        div()
+                            .flex_none()
+                            .mt(px(1.))
+                            .size(px(22.))
+                            .rounded_full()
+                            .bg(theme.secondary)
+                            .text_color(theme.secondary_foreground)
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(number.to_string()),
+                    )
+                })
                 .child(
                     v_flex()
                         .gap_0p5()

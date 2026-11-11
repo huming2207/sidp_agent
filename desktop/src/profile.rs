@@ -13,6 +13,24 @@ use std::{
 /// GDB port used when a profile does not set one.
 pub const DEFAULT_GDB_PORT: u16 = 3333;
 
+/// What the user is doing; each mode has its own page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    /// Program targets, by request or whenever one is plugged in.
+    #[default]
+    Program,
+    /// Serve GDB, optionally programming first and measuring power.
+    Debug,
+    /// Measure the target's current and voltage.
+    Power,
+}
+
+impl Mode {
+    /// All modes, in display order.
+    pub const ALL: [Mode; 3] = [Mode::Program, Mode::Debug, Mode::Power];
+}
+
 /// How a debug session starts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -38,6 +56,8 @@ pub struct DebugOptions {
     pub resume_on_detach: bool,
     /// Attach again and keep listening after GDB disconnects.
     pub keep_serving: bool,
+    /// Measure power while debugging.
+    pub measure_power: bool,
 }
 
 impl Default for DebugOptions {
@@ -48,6 +68,7 @@ impl Default for DebugOptions {
             connect_under_reset: false,
             resume_on_detach: false,
             keep_serving: true,
+            measure_power: false,
         }
     }
 }
@@ -164,6 +185,8 @@ pub struct State {
     pub profiles: Vec<Profile>,
     /// Index of the profile shown.
     pub selected: usize,
+    /// The page shown.
+    pub mode: Mode,
     /// Serial port of the last device used.
     pub port: Option<String>,
     /// Shared settings.
@@ -176,6 +199,7 @@ impl Default for State {
             version: 1,
             profiles: vec![Profile::named("My target")],
             selected: 0,
+            mode: Mode::default(),
             port: None,
             settings: Settings::default(),
         }
@@ -328,6 +352,8 @@ mod tests {
         assert_eq!(state.selected, 0);
         assert_eq!(state.profile().debug.port, DEFAULT_GDB_PORT);
         assert!(state.profile().debug.keep_serving);
+        assert!(!state.profile().debug.measure_power);
+        assert_eq!(state.mode, Mode::Program);
         assert_eq!(state.settings.timeout_ms, 5000);
     }
 
