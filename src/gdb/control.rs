@@ -1,7 +1,7 @@
-//! Execution and explicit hardware-breakpoint callbacks. Z0 is rejected rather
+//! Execution, hardware-breakpoint and monitor callbacks. Z0 is rejected rather
 //! than allowing GDB to silently patch RAM through ordinary memory writes.
 use super::*;
-use crate::session::{CAP_HW_BP, CAP_STEP};
+use crate::session::{CAP_HW_BP, CAP_STEP, ResetKind};
 use gdbstub::{
     common::Signal,
     target::{
@@ -11,6 +11,7 @@ use gdbstub::{
                 SingleThreadResume, SingleThreadSingleStep, SingleThreadSingleStepOps,
             },
             breakpoints::*,
+            monitor_cmd::{ConsoleOutput, MonitorCmd, outputln},
         },
     },
 };
@@ -67,5 +68,28 @@ impl<T: Transport> HwBreakpoint for Adapter<T> {
     }
     fn remove_hw_breakpoint(&mut self, address: u32, _: usize) -> TargetResult<bool, Self> {
         Ok(self.session.remove_breakpoint(address))
+    }
+}
+impl<T: Transport> MonitorCmd for Adapter<T> {
+    fn handle_monitor_cmd(&mut self, cmd: &[u8], mut out: ConsoleOutput<'_>) -> Result<(), Error> {
+        let kind = match cmd {
+            b"reset" | b"reset system" => ResetKind::System,
+            b"reset nrst" => ResetKind::Nrst,
+            _ => {
+                outputln!(out, "usage: monitor reset [system|nrst]");
+                return Ok(());
+            }
+        };
+        match self.session.reset_halt(kind) {
+            // GDB keeps its cached registers across a monitor command, and RSP
+            // has no all-stop packet that would make it read them again.
+            Ok(()) => outputln!(
+                out,
+                "Target reset and halted. Run `maint flush register-cache` to see the new registers."
+            ),
+            Err(e) if self.session.is_closed() || matches!(e, Error::Io(_)) => return Err(e),
+            Err(e) => outputln!(out, "Reset failed: {e}"),
+        }
+        Ok(())
     }
 }

@@ -113,6 +113,12 @@ try:
     raise AssertionError('Flash write unexpectedly accepted')
 except gdb.MemoryError:
     pass
+assert int(gdb.parse_and_eval('$pc')) == 0x08000012
+assert 'maint flush register-cache' in gdb.execute('monitor reset', to_string=True)
+gdb.execute('maint flush register-cache')
+assert int(gdb.parse_and_eval('$pc')) == 0x08000000
+gdb.execute('monitor reset nrst')
+assert 'usage' in gdb.execute('monitor bogus', to_string=True)
 print('SIDP_E2E_OK')
 end
 detach
@@ -149,6 +155,7 @@ quit
         first_write = requests.index(0x14)
         assert 0x13 not in requests[:first_write], requests
         assert requests.count(0x20) == 3 and 0x21 in requests, requests
+        assert requests.count(0x22) == 2, requests
         print(f"PASS {label}: real GDB, fragmented CDC, C++ SIDP session ({len(requests)} requests)")
     finally:
         stop.set()

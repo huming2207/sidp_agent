@@ -24,7 +24,7 @@ public:
     esp_err_t attach(const sidp::attach_params_t &, sidp::attach_info_t &info) override {
         info.profile = static_cast<sidp::target_profile_t>(profile_);
         info.capabilities = static_cast<sidp::capability_t>(sidp::CAP_STOP_SNAPSHOT | sidp::CAP_HARDWARE_BP |
-            sidp::CAP_SINGLE_STEP | (fpu_ ? static_cast<uint32_t>(sidp::CAP_FPU) : 0u));
+            sidp::CAP_SINGLE_STEP | sidp::CAP_RESET_HALT | sidp::CAP_RESET_SYSTEM | sidp::CAP_RESET_NRST | (fpu_ ? static_cast<uint32_t>(sidp::CAP_FPU) : 0u));
         info.hardware_breakpoints = 2;
         info.max_memory_transfer = 64; // force real multi-frame reads/writes
         info.memory_regions = {reinterpret_cast<const uint8_t *>(regions_.data()), sizeof(regions_)};
@@ -34,7 +34,10 @@ public:
         halted_ = action == sidp::DETACH_KEEP_HALTED;
         bps_.clear(); return ESP_OK;
     }
-    esp_err_t reset(sidp::reset_kind_t, bool, sidp::stop_detect_t &) override { return ESP_ERR_NOT_SUPPORTED; }
+    esp_err_t reset(sidp::reset_kind_t, bool halt_after, sidp::stop_detect_t &stop) override {
+        regs_[15] = 0x08000000; halted_ = halt_after; stepping_ = false; stopping_ = false;
+        observe(stop); return ESP_OK;
+    }
     esp_err_t halt(uint32_t, sidp::stop_detect_t &stop) override {
         halted_ = true; stepping_ = false; stopping_ = false;
         observe(stop); return ESP_OK;

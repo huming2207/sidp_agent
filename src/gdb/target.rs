@@ -10,6 +10,7 @@ use gdbstub::target::{
             singlethread::{SingleThreadBase, SingleThreadResumeOps},
         },
         breakpoints::BreakpointsOps,
+        monitor_cmd::MonitorCmdOps,
         target_description_xml_override::{
             TargetDescriptionXmlOverride, TargetDescriptionXmlOverrideOps,
         },
@@ -40,6 +41,9 @@ impl<T: Transport> Target for Adapter<T> {
         Some(self)
     }
     fn support_breakpoints(&mut self) -> Option<BreakpointsOps<'_, Self>> {
+        Some(self)
+    }
+    fn support_monitor_cmd(&mut self) -> Option<MonitorCmdOps<'_, Self>> {
         Some(self)
     }
 }
