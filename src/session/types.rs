@@ -1,6 +1,15 @@
 //! Validated attach metadata and stopped-event payloads.
 use super::*;
 
+/// How the firmware resets the target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResetKind {
+    /// Core-requested system reset (SYSRESETREQ).
+    System = 1,
+    /// Pulse the target's reset pin.
+    Nrst = 2,
+}
+
 /// One validated target memory region.
 #[derive(Clone, Debug)]
 pub struct Region {

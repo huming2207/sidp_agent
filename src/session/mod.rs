@@ -45,7 +45,7 @@ mod memory;
 mod registers;
 mod types;
 use types::registers;
-pub use types::{Region, RegisterValues, Stop, TargetInfo};
+pub use types::{Region, RegisterValues, ResetKind, Stop, TargetInfo};
 
 /// Single-core SIDP session with one outstanding request and no reconnect replay.
 pub struct Session<T: Transport> {

@@ -1,7 +1,7 @@
 //! Session regressions using scripted complete-frame transport boundaries.
 use sidp_agent::{
     codec::{EVENT, Frame, RESPONSE},
-    session::{CAP_HW_BP, CAP_STEP, Session},
+    session::{CAP_HW_BP, CAP_STEP, ResetKind, Session},
     transport::Transport,
 };
 use std::{cell::RefCell, collections::VecDeque, io, rc::Rc, time::Duration};
@@ -168,6 +168,27 @@ fn stale_and_malformed_events_are_fatal() {
         assert!(session.poll(Duration::from_millis(1)).is_err());
         assert!(session.is_closed());
     }
+}
+#[test]
+fn reset_halt_waits_for_the_new_stop() {
+    let (mut session, wire) = setup(15);
+    wire.borrow_mut()
+        .incoming
+        .extend([response(0x22, 2, &[]), stopped(2, false)]);
+    session.reset_halt(ResetKind::Nrst).unwrap();
+    assert_eq!(session.stop().unwrap().id, 2);
+    assert_eq!(wire.borrow().sent[1].opcode, 0x22);
+    assert_eq!(&wire.borrow().sent[1].payload, &[2, 0, 0, 0]);
+}
+#[test]
+fn failed_reset_keeps_the_session_open() {
+    let (mut session, wire) = setup(15);
+    let mut unsupported = response(0x22, 2, &[]);
+    unsupported.payload = 3i32.to_le_bytes().to_vec();
+    wire.borrow_mut().incoming.push_back(unsupported);
+    assert!(session.reset_halt(ResetKind::System).is_err());
+    assert!(!session.is_closed());
+    assert_eq!(session.stop().unwrap().id, 1);
 }
 #[test]
 fn detach_closes_the_physical_connection() {

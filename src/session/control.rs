@@ -60,6 +60,12 @@ impl<T: Transport> Session<T> {
             Err(e) => Err(e),
         }
     }
+    /// Reset the target and await the stop at its reset vector.
+    pub fn reset_halt(&mut self, kind: ResetKind) -> Result<()> {
+        self.empty_request(0x22, vec![kind as u8, 0, 0, 0])?;
+        self.stop = None;
+        self.wait_stopped()
+    }
     /// Detach with keep-halted (default) or explicit resume, then close DTR.
     pub fn detach(&mut self, resume: bool) -> Result<()> {
         let result = self.empty_request(2, vec![if resume { 2 } else { 1 }, 0, 0, 0]);
