@@ -125,7 +125,8 @@ pub fn push_job<T: Transport>(
     session.job_set(&job_sha256, trigger)
 }
 
-/// Polls JOB_GET until run `run_id` has a result.
+/// Polls JOB_GET until run `run_id` has a result and the device has left the
+/// run. The result appears first, while the device still writes its log entry.
 pub fn wait_for_run<T: Transport>(
     session: &mut Session<T>,
     run_id: u32,
@@ -133,7 +134,8 @@ pub fn wait_for_run<T: Transport>(
 ) -> Result<RunResult> {
     loop {
         let status: JobStatus = session.job_get()?;
-        if let Some(result) = status.last_result
+        if status.current_run_id == 0
+            && let Some(result) = status.last_result
             && result.run_id == run_id
         {
             return Ok(result);

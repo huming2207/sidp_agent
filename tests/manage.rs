@@ -148,6 +148,25 @@ fn run_result_is_matched_by_run_id() {
 }
 
 #[test]
+fn run_is_not_finished_while_the_device_is_still_in_it() {
+    let recording = JobStatus {
+        current_run_id: 7,
+        last_result: Some(RunResult {
+            run_id: 7,
+            outcome: Outcome::Pass as i32,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let (mut session, wire) = setup(&[
+        (manage::JOB_GET, recording.encode_to_vec()),
+        (manage::JOB_GET, job_status(None, 7)),
+    ]);
+    manage::wait_for_run(&mut session, 7, Duration::ZERO).unwrap();
+    assert_eq!(wire.borrow().sent.len(), 2);
+}
+
+#[test]
 fn asset_names_follow_device_rules() {
     assert!(manage::is_valid_asset_name("firmware-v1.2_a.bin"));
     let too_long = "a".repeat(32);
