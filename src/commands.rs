@@ -15,6 +15,8 @@ use std::{
 };
 
 type CommandResult = Result<(), Box<dyn Error>>;
+/// An open connection to a device over USB.
+pub type DeviceSession = Session<UsbCdc>;
 
 /// How often `job run --wait` polls the device.
 const RUN_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -46,7 +48,7 @@ pub struct Connection {
 
 impl Connection {
     /// Opens a fresh SIDP connection.
-    pub fn open(&self) -> std::io::Result<Session<UsbCdc>> {
+    pub fn open(&self) -> std::io::Result<DeviceSession> {
         let usb = UsbCdc::open(
             &self.port,
             self.baud,
@@ -277,13 +279,32 @@ pub fn job_run(connection: &Connection, wait: bool) -> CommandResult {
     if !wait {
         return Ok(());
     }
+    wait_for_pass(&mut session, run_id)
+}
 
-    let result = manage::wait_for_run(&mut session, run_id, RUN_POLL_INTERVAL)?;
+fn wait_for_pass(session: &mut DeviceSession, run_id: u32) -> CommandResult {
+    let result = manage::wait_for_run(session, run_id, RUN_POLL_INTERVAL)?;
     println!("{}", describe_result(&result));
     if result.outcome != Outcome::Pass as i32 {
         return Err(format!("run {run_id} did not pass").into());
     }
     Ok(())
+}
+
+/// Compiles and activates the job, programs the target once and returns the
+/// open connection so that the caller can attach to it.
+pub fn program_target(
+    connection: &Connection,
+    source: &JobSource,
+) -> Result<DeviceSession, Box<dyn Error>> {
+    let job = build_job(source)?;
+    let mut session = connection.open()?;
+    set_device_time(&mut session, connection);
+    manage::push_job(&mut session, &job.bytes, &job.images, Trigger::Manual)?;
+    println!("Job '{}' active, programming", job.name);
+    let run_id = session.job_run_once()?;
+    wait_for_pass(&mut session, run_id)?;
+    Ok(session)
 }
 
 /// `job status`.

@@ -2,9 +2,12 @@
 //! See `sidp-agent --help`.
 mod commands;
 
-use clap::{Parser, Subcommand};
-use commands::{Connection, JobSource};
-use sidp_agent::{manage, session};
+use clap::{Args, Parser, Subcommand};
+use commands::{Connection, DeviceSession, JobSource};
+use sidp_agent::{
+    manage,
+    session::{self, ResetKind},
+};
 use std::{
     net::{SocketAddr, TcpListener},
     path::PathBuf,
@@ -20,6 +23,16 @@ struct Cli {
     #[command(subcommand)]
     command: Command,
 }
+/// Options of the commands that serve GDB.
+#[derive(Args)]
+struct GdbOptions {
+    /// Local GDB address. Only loopback addresses are accepted.
+    #[arg(long, default_value = "127.0.0.1:3333")]
+    listen: SocketAddr,
+    /// Resume on clean GDB detach (default keeps the target halted).
+    #[arg(long)]
+    resume_on_detach: bool,
+}
 #[derive(Subcommand)]
 enum Command {
     /// List serial ports visible to the operating system.
@@ -28,12 +41,17 @@ enum Command {
     Gdb {
         #[command(flatten)]
         connection: Connection,
-        /// Local GDB address. Only loopback addresses are accepted.
-        #[arg(long, default_value = "127.0.0.1:3333")]
-        listen: SocketAddr,
-        /// Resume on clean GDB detach (default keeps the target halted).
-        #[arg(long)]
-        resume_on_detach: bool,
+        #[command(flatten)]
+        options: GdbOptions,
+    },
+    /// Program the target with a job, halt it at reset and serve one local GDB connection.
+    Debug {
+        #[command(flatten)]
+        connection: Connection,
+        #[command(flatten)]
+        source: JobSource,
+        #[command(flatten)]
+        options: GdbOptions,
     },
     /// Compile target.yaml, optional procedure YAML and images into a job file.
     Compile {
@@ -164,9 +182,13 @@ fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Gdb {
             connection,
-            listen,
-            resume_on_detach,
-        } => serve_gdb(&connection, listen, resume_on_detach),
+            options,
+        } => attach_and_serve(&connection, &options),
+        Command::Debug {
+            connection,
+            source,
+            options,
+        } => program_and_serve(&connection, &source, &options),
         Command::Compile { source, output } => commands::compile_job(&source, &output),
         Command::Device {
             command: DeviceCommand::Info { connection },
@@ -204,26 +226,50 @@ fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>
     }
 }
 
-fn serve_gdb(
-    connection: &Connection,
-    listen: SocketAddr,
-    resume_on_detach: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if !listen.ip().is_loopback() {
+/// Reserves the listener before the target is touched; a bind failure must
+/// not leave an otherwise untouched device halted.
+fn bind_gdb(options: &GdbOptions) -> Result<TcpListener, Box<dyn std::error::Error>> {
+    if !options.listen.ip().is_loopback() {
         return Err("--listen must be a loopback address".into());
     }
-    // Reserve the listener before touching the target; bind failure must
-    // not leave an otherwise untouched device halted.
-    let listener = TcpListener::bind(listen)?;
+    Ok(TcpListener::bind(options.listen)?)
+}
+
+fn attach_and_serve(
+    connection: &Connection,
+    options: &GdbOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let listener = bind_gdb(options)?;
     let mut session = connection.open()?;
     session.attach()?;
+    serve_gdb(listener, session, options)
+}
+
+fn program_and_serve(
+    connection: &Connection,
+    source: &JobSource,
+    options: &GdbOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let listener = bind_gdb(options)?;
+    let mut session = commands::program_target(connection, source)?;
+    session.attach()?;
+    // The new firmware has been running since programming finished.
+    session.reset_halt(ResetKind::System)?;
+    serve_gdb(listener, session, options)
+}
+
+fn serve_gdb(
+    listener: TcpListener,
+    session: DeviceSession,
+    options: &GdbOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
     let info = session.info().unwrap();
     eprintln!(
         "Attached profile={} capabilities=0x{:x}",
         info.profile, info.capabilities
     );
     println!("GDB listening on {}", listener.local_addr()?);
-    let requests = sidp_agent::gdb::serve(listener, session, resume_on_detach)?;
+    let requests = sidp_agent::gdb::serve(listener, session, options.resume_on_detach)?;
     eprintln!("Detached; {requests} SIDP requests sent");
     Ok(())
 }
