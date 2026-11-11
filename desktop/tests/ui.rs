@@ -9,7 +9,7 @@ use gpui_kit::{
     TestAppContext, Window, WindowBounds, WindowOptions, point, px, size,
 };
 use sidp_desktop::{
-    profile::{DEFAULT_GDB_PORT, Mode, State},
+    profile::{DEFAULT_GDB_PORT, DebugMode, Mode, State},
     snippets::Client,
     ui::app::{AppView, Readiness},
 };
@@ -423,6 +423,44 @@ async fn power_can_be_measured_while_debugging(cx: &mut TestAppContext) {
     })
     .unwrap();
     cx.update(|cx| assert!(view.read(cx).state().profile().debug.measure_power));
+}
+
+#[gpui_kit::test]
+async fn a_debug_session_leaves_a_recording_started_by_hand(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, view) = open(cx, &dir.path().join("state.json"));
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        choose_mode(window, Mode::Power, cx);
+        window.within("power-source").click(1usize, cx);
+        window.click("power-start", cx);
+    })
+    .unwrap();
+    run_until(cx, &view, |power| power.recording().len() >= 50);
+
+    // With no Soul Injector plugged in, the session ends at once. With one,
+    // it would really attach to the target, so the test stops here.
+    if cx.update(|cx| view.read(cx).selected_port().is_some()) {
+        eprintln!("skipped: a Soul Injector is plugged in");
+        return;
+    }
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |this, cx| {
+            this.set_debug_option(cx, |o| {
+                o.mode = DebugMode::Attach;
+                o.measure_power = true;
+            });
+            this.toggle_debug(window, cx);
+        })
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(cx.update(|cx| !view.read(cx).is_busy()));
+    let before = cx.update(|cx| view.read(cx).power().read(cx).recording().len());
+    run_until(cx, &view, |power| {
+        !power.is_capturing() || power.recording().len() >= before + 100
+    });
+    cx.update(|cx| assert!(view.read(cx).power().read(cx).is_capturing()));
 }
 
 #[gpui_kit::test]

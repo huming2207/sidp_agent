@@ -1130,7 +1130,9 @@ impl AppView {
             return;
         }
         let options = self.state.profile().debug.clone();
-        if options.measure_power && !self.is_busy() {
+        // A recording the user started is theirs: the session neither
+        // restarts it nor stops it.
+        if options.measure_power && !self.is_busy() && !self.power.read(cx).is_capturing() {
             self.power.update(cx, |power, cx| power.start(cx));
             self.power_with_debug = true;
         }
