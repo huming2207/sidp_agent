@@ -95,17 +95,34 @@ documented in `sidp_client/docs/sidp-management.md`.
 
 ```sh
 cargo run -- ports
+# Program the target, halt it at reset and serve GDB:
+cargo run -- debug --port /dev/ttyACM0 --target target.yaml \
+    --image firmware.bin=build/app.bin
+# Or attach to whatever the target is already running:
 cargo run -- gdb --port /dev/ttyACM0
 # In another terminal (ARM-capable GDB):
 arm-none-eabi-gdb firmware.elf
 (gdb) target remote 127.0.0.1:3333
 (gdb) info registers
 (gdb) x/16wx $sp
-(gdb) hbreak main
+(gdb) break main
 (gdb) continue
-(gdb) stepi
+(gdb) next
+(gdb) monitor reset
 (gdb) detach
 ```
+
+`debug` takes the same job options as `job push` and fails before attaching if
+the run does not pass. It sets the job's trigger to manual, so use `job push
+--auto` afterwards to re-arm a job that runs when a target is plugged in. Both
+`debug` and `gdb` accept `--connect-under-reset`, which holds the target in
+reset while connecting and stops it before its first instruction. Use it for
+firmware that sleeps or reuses the SWD pins soon after boot.
+
+`monitor reset` uses a system reset and `monitor reset nrst` pulses the reset
+pin. Both leave the target halted at its reset vector. GDB does not re-read
+registers after a monitor command, so run `maint flush register-cache` to see
+them; `continue` and `stepi` are unaffected.
 
 Windows ports use names such as `COM3`; macOS commonly uses `/dev/cu.usbmodem*`.
 The device must expose the SIDP CDC interface and already have the firmware
@@ -117,12 +134,14 @@ target cleanup keeps it halted. GDB EOF, process exit, or USB errors close the
 physical connection. The device's disconnect policy is responsible for cleanup.
 `--no-dtr` is for PTY testing only. See `gdb --help` for timeout/settling controls.
 
-Use **`hbreak`**, not `break`: this milestone implements explicit hardware
-breakpoints and rejects software breakpoint requests. GDB `load`/Flash writes,
-MMIO, watchpoints, signal delivery, reset commands, RTOS threads and extended
-remote launch are not supported. Native single stepping is exposed only when
-advertised by the firmware. M4 FPU register descriptions expose GDB D0-D15 by
-combining SIDP S-register pairs; unavailable registers remain unavailable.
+The agent gives GDB the target's memory map with Flash marked read-only, so
+GDB uses hardware breakpoints there for `break`, `next` and `finish`. Software
+breakpoints are rejected, so a plain `break` in RAM fails. Memory outside the
+map cannot be read. GDB `load`/Flash writes, MMIO, watchpoints, signal delivery,
+RTOS threads and extended remote launch are not supported. Native single
+stepping is exposed only when advertised by the firmware. M4 FPU register
+descriptions expose GDB D0-D15 by combining SIDP S-register pairs; unavailable
+registers remain unavailable.
 
 ## End-to-end testing without hardware
 
@@ -140,9 +159,10 @@ from that checkout, links a deterministic register/RAM backend, and connects
 it to the actual Rust CLI through a serial PTY. Real GDB exercises M0, M3, M4
 without FPU, and M4 with FPU. The test fragments stream writes into seven-byte
 pieces and covers attach, snapshot registers/stack, FPU aliases, hardware
-breakpoints, continue, single step, Ctrl-C halt, register writes, multi-chunk
-RAM transfers, Flash-write rejection and detach. Additional cases verify that
-USB loss, invalid CRC and debugger EOF end the process without replay.
+breakpoints, the memory map, `monitor reset`, continue, single step, Ctrl-C
+halt, register writes, multi-chunk RAM transfers, Flash-write rejection and
+detach. Additional cases verify that USB loss, invalid CRC and debugger EOF end
+the process without replay.
 
 Supply `--output /tmp/sidp-e2e` to retain diagnostic logs in a chosen directory.
 The runner fails rather than silently skips if GDB or the C++ component is
