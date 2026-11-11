@@ -181,6 +181,16 @@ impl BuiltJob {
     }
 }
 
+/// What the user chooses for the image with device name `name`: "firmware
+/// to program" for a Cortex-M target's only image, else "file for <name>".
+pub fn image_description(name: &str) -> String {
+    if name == manage::FIRMWARE_NAME {
+        "firmware to program".into()
+    } else {
+        format!("file for {name}")
+    }
+}
+
 /// Compiles the profile's job, reading every file it names.
 ///
 /// Errors are sentences meant for the user.
@@ -204,7 +214,7 @@ pub fn build_job(profile: &Profile) -> Result<BuiltJob, String> {
     let mut hashes = ImageHashes::new();
     for name in &variant.images {
         let Some(path) = profile.images.get(name) else {
-            return Err(format!("Choose the file to program as {name}."));
+            return Err(format!("Choose the {}.", image_description(name)));
         };
         let data =
             std::fs::read(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
@@ -321,7 +331,10 @@ mod tests {
         let mut profile = Profile::named("t");
         assert!(build_job(&profile).unwrap_err().contains("target.yaml"));
         profile.target = Some(fixture("stm32wle5cc.yaml"));
-        assert!(build_job(&profile).unwrap_err().contains("firmware.bin"));
+        assert_eq!(
+            build_job(&profile).unwrap_err(),
+            "Choose the firmware to program."
+        );
         profile.variant = Some("nope".into());
         assert!(build_job(&profile).unwrap_err().contains("nope"));
     }

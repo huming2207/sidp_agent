@@ -2,7 +2,7 @@
 //! modules; this one decides what happens.
 use super::power::PowerView;
 use crate::{
-    platform,
+    describe, platform,
     ports::{self, Port},
     profile::{DebugMode, Mode, Profile, State},
     snippets::{self, Client, DebugTarget},
@@ -587,7 +587,8 @@ impl AppView {
                 self.image_inputs.push(old.remove(ix));
                 continue;
             }
-            let input = text_input(&format!("File to program as {name}"), window, cx);
+            let placeholder = describe::capitalize(&target::image_description(&name));
+            let input = text_input(&placeholder, window, cx);
             let value = path_text(profile.images.get(&name).map(PathBuf::as_path));
             input.update(cx, |input, cx| input.set_value(value, window, cx));
             let key = name.clone();
@@ -765,7 +766,7 @@ impl AppView {
             PathField::Elf => "Choose the firmware ELF".to_owned(),
             PathField::PreProgram => "Choose pre_prog.yaml".to_owned(),
             PathField::PostProgram => "Choose post_prog.yaml".to_owned(),
-            PathField::Image(name) => format!("Choose the file to program as {name}"),
+            PathField::Image(name) => format!("Choose the {}", target::image_description(name)),
             PathField::Gdb => "Choose a GDB executable".to_owned(),
         };
         let receiver = cx.prompt_for_paths(PathPromptOptions {
@@ -805,7 +806,7 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let text = path.to_string_lossy().into_owned();
+        let text = path_text(Some(&path));
         let input = match &field {
             PathField::Target => Some(self.target_input.clone()),
             PathField::Elf => Some(self.elf_input.clone()),
@@ -816,17 +817,28 @@ impl AppView {
                 .iter()
                 .find(|i| &i.name == name)
                 .map(|i| i.input.clone()),
+            PathField::Gdb => None,
+        };
+        if let Some(input) = input {
+            input.update(cx, |input, cx| input.set_value(text, window, cx));
+        }
+        // `set_value` emits no change event, so the profile is updated here.
+        match field {
+            PathField::Target => self.edit_profile(window, cx, |p| p.target = Some(path)),
+            PathField::Elf => self.edit_profile(window, cx, |p| p.elf = Some(path)),
+            PathField::PreProgram => self.edit_profile(window, cx, |p| p.pre_program = Some(path)),
+            PathField::PostProgram => {
+                self.edit_profile(window, cx, |p| p.post_program = Some(path))
+            }
+            PathField::Image(name) => self.edit_profile(window, cx, |p| {
+                p.images.insert(name, path);
+            }),
             PathField::Gdb => {
                 self.state.settings.gdb = Some(path);
                 self.save_soon(cx);
                 self.refresh_gdb_select(window, cx);
                 cx.notify();
-                None
             }
-        };
-        // The input's change event updates the profile.
-        if let Some(input) = input {
-            input.update(cx, |input, cx| input.set_value(text, window, cx));
         }
     }
 

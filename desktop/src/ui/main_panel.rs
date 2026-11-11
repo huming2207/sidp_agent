@@ -133,7 +133,7 @@ impl AppView {
             } else {
                 (
                     "Firmware image".into(),
-                    Some("The raw binary to program (.bin), stored on the Soul Injector as firmware.bin.".into()),
+                    Some("The raw binary to program (.bin).".into()),
                 )
             };
             body = body.child(field(

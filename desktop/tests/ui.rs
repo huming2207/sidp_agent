@@ -126,6 +126,55 @@ async fn filling_in_the_target_makes_a_ready_job_and_saves_it(cx: &mut TestAppCo
     assert_eq!(saved.profile().images["firmware.bin"], firmware);
 }
 
+/// Clicks a Browse button and picks `path` in the file chooser.
+fn browse(cx: &mut TestAppContext, window: AnyWindowHandle, button: &str, path: &Path) {
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(button.to_owned(), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let path = path.to_path_buf();
+    cx.simulate_path_prompt_response(|_| Some(vec![path]));
+    cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+async fn browsing_fills_in_the_profile_after_a_wrong_choice(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let firmware = dir.path().join("app.bin");
+    std::fs::write(&firmware, [0x55; 1024]).unwrap();
+    let elf = dir.path().join("app.elf");
+    std::fs::write(&elf, b"\x7fELF").unwrap();
+    let (window, view) = open(cx, &dir.path().join("state.json"));
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        choose_mode(window, Mode::Debug, cx);
+    })
+    .unwrap();
+
+    // A file that is not a target description first, then the right one.
+    browse(cx, window, "target-browse", &fixture("pre_prog.yaml"));
+    cx.wait_for(window, WAIT, |_, cx| {
+        matches!(view.read(cx).readiness(), Readiness::Problem(_))
+    })
+    .await;
+    browse(cx, window, "image-firmware.bin-browse", &firmware);
+    browse(cx, window, "target-browse", &fixture("stm32wle5cc.yaml"));
+    browse(cx, window, "elf-browse", &elf);
+
+    cx.wait_for(window, WAIT, |_, cx| {
+        matches!(view.read(cx).readiness(), Readiness::Ready(_))
+    })
+    .await;
+    cx.update(|cx| {
+        let profile = view.read(cx).state().profile();
+        assert_eq!(profile.target, Some(fixture("stm32wle5cc.yaml")));
+        assert_eq!(profile.images["firmware.bin"], firmware);
+        assert_eq!(profile.elf, Some(elf));
+    });
+}
+
 #[gpui_kit::test]
 async fn a_missing_image_is_explained(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -141,7 +190,7 @@ async fn a_missing_image_is_explained(cx: &mut TestAppContext) {
     })
     .unwrap();
     cx.wait_for(window, WAIT, |_, cx| match view.read(cx).readiness() {
-        Readiness::Problem(problem) => problem.contains("firmware.bin"),
+        Readiness::Problem(problem) => problem.as_ref() == "Choose the firmware to program.",
         _ => false,
     })
     .await;
