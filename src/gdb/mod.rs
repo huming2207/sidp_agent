@@ -16,7 +16,7 @@ use crate::{
 };
 use architecture::{CortexM, Registers};
 use mapping::Layout;
-pub use server::serve;
+pub use server::{Served, serve};
 
 struct Adapter<T: Transport> {
     session: Session<T>,

@@ -282,7 +282,11 @@ fn serve_gdb(
         info.profile, info.capabilities
     );
     println!("GDB listening on {}", listener.local_addr()?);
-    let requests = sidp_agent::gdb::serve(listener, session, options.resume_on_detach)?;
-    eprintln!("Detached; {requests} SIDP requests sent");
+    let served = sidp_agent::gdb::serve(listener, session, options.resume_on_detach)?;
+    eprintln!(
+        "Detached; target {}; {} SIDP requests sent",
+        if served.resumed { "running" } else { "halted" },
+        served.requests
+    );
     Ok(())
 }

@@ -12,17 +12,27 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// How a GDB session that ended with a detach or kill left the target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Served {
+    /// The target was resumed. Only a detach with `resume_on_detach` does
+    /// that; a kill leaves it halted.
+    pub resumed: bool,
+    /// SIDP requests sent, for measurement.
+    pub requests: u64,
+}
+
 /// Serve one GDB client on an already-bound loopback listener.
 ///
 /// The session must already be attached and halted. A clean GDB detach sends
 /// SIDP DETACH (keep-halted unless `resume_on_detach`); EOF/errors close the
-/// physical link so firmware performs its disconnect cleanup. Returns total
-/// SIDP request count for measurement. No second client or reconnect is accepted.
+/// physical link so firmware performs its disconnect cleanup. No second
+/// client or reconnect is accepted.
 pub fn serve<T: Transport>(
     listener: TcpListener,
     session: Session<T>,
     resume_on_detach: bool,
-) -> Result<u64, Box<dyn std::error::Error>> {
+) -> Result<Served, Box<dyn std::error::Error>> {
     if !listener.local_addr()?.ip().is_loopback() {
         return Err("GDB listener must be loopback".into());
     }
@@ -81,8 +91,12 @@ pub fn serve<T: Transport>(
                     state.get_reason(),
                     gdbstub::stub::DisconnectReason::Disconnect
                 );
-                target.session.detach(resume_on_detach && clean_detach)?;
-                return Ok(target.session.request_count());
+                let resumed = resume_on_detach && clean_detach;
+                target.session.detach(resumed)?;
+                return Ok(Served {
+                    resumed,
+                    requests: target.session.request_count(),
+                });
             }
         };
     }
