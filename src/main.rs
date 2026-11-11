@@ -32,6 +32,9 @@ struct GdbOptions {
     /// Resume on clean GDB detach (default keeps the target halted).
     #[arg(long)]
     resume_on_detach: bool,
+    /// Hold the target in reset while connecting, for firmware that sleeps or reuses the SWD pins.
+    #[arg(long)]
+    connect_under_reset: bool,
 }
 #[derive(Subcommand)]
 enum Command {
@@ -241,7 +244,7 @@ fn attach_and_serve(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = bind_gdb(options)?;
     let mut session = connection.open()?;
-    session.attach()?;
+    attach(&mut session, options)?;
     serve_gdb(listener, session, options)
 }
 
@@ -252,10 +255,20 @@ fn program_and_serve(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = bind_gdb(options)?;
     let mut session = commands::program_target(connection, source)?;
-    session.attach()?;
+    attach(&mut session, options)?;
     // The new firmware has been running since programming finished.
-    session.reset_halt(ResetKind::System)?;
+    if !options.connect_under_reset {
+        session.reset_halt(ResetKind::System)?;
+    }
     serve_gdb(listener, session, options)
+}
+
+fn attach(session: &mut DeviceSession, options: &GdbOptions) -> session::Result<()> {
+    if options.connect_under_reset {
+        session.attach_under_reset()
+    } else {
+        session.attach()
+    }
 }
 
 fn serve_gdb(

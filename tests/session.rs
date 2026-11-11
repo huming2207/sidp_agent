@@ -54,8 +54,7 @@ fn stopped(id: u32, flags: bool) -> Frame {
         payload: p,
     }
 }
-fn setup(flags: u8) -> (Session<Script>, Rc<RefCell<Wire>>) {
-    let wire = Rc::new(RefCell::new(Wire::default()));
+fn attach_frames(flags: u8) -> [Frame; 2] {
     let mut info = vec![1, 3, 32, 0];
     info.extend((CAP_HW_BP | CAP_STEP | 1).to_le_bytes());
     info.extend([0; 12]);
@@ -66,12 +65,26 @@ fn setup(flags: u8) -> (Session<Script>, Rc<RefCell<Wire>>) {
     info.extend(0x20000000u64.to_le_bytes());
     info.extend(0x1000u64.to_le_bytes());
     info.extend([1, flags, 0, 0]);
-    wire.borrow_mut()
-        .incoming
-        .extend([response(1, 1, &info), stopped(1, false)]);
-    let mut session = Session::new(Script(wire.clone()), Duration::from_millis(20));
+    [response(1, 1, &info), stopped(1, false)]
+}
+fn unattached(flags: u8) -> (Session<Script>, Rc<RefCell<Wire>>) {
+    let wire = Rc::new(RefCell::new(Wire::default()));
+    wire.borrow_mut().incoming.extend(attach_frames(flags));
+    let session = Session::new(Script(wire.clone()), Duration::from_millis(20));
+    (session, wire)
+}
+fn setup(flags: u8) -> (Session<Script>, Rc<RefCell<Wire>>) {
+    let (mut session, wire) = unattached(flags);
     session.attach().unwrap();
     (session, wire)
+}
+#[test]
+fn attach_requests_connect_under_reset_only_when_asked() {
+    let (_session, wire) = setup(15);
+    assert_eq!(wire.borrow().sent[0].payload[4], 0);
+    let (mut session, wire) = unattached(15);
+    session.attach_under_reset().unwrap();
+    assert_eq!(wire.borrow().sent[0].payload[4], 1);
 }
 #[test]
 fn snapshot_hits_and_run_invalidation() {

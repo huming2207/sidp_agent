@@ -94,10 +94,18 @@ impl<T: Transport> Session<T> {
     }
     /// Attach without reset, request a halt, and wait for its first STOPPED.
     pub fn attach(&mut self) -> Result<()> {
+        self.attach_with(false)
+    }
+    /// Attach with the target held in reset, stopping it before its first
+    /// instruction. For firmware that sleeps or reuses the SWD pins early.
+    pub fn attach_under_reset(&mut self) -> Result<()> {
+        self.attach_with(true)
+    }
+    fn attach_with(&mut self, under_reset: bool) -> Result<()> {
         if self.info.is_some() {
             return Err(Error::State("already attached"));
         }
-        let payload = self.request(1, vec![64, 0, 0, 2, 0, 1, 0, 0])?;
+        let payload = self.request(1, vec![64, 0, 0, 2, under_reset as u8, 1, 0, 0])?;
         let info = match TargetInfo::parse(&payload) {
             Ok(info) => info,
             Err(e) => return self.wire_error(e),
