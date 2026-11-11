@@ -199,13 +199,17 @@ fn non_empty_path(text: &str) -> Option<PathBuf> {
 }
 
 impl AppView {
-    /// Builds the view with the user's saved state.
+    /// Builds the view with the user's saved state and starts watching USB
+    /// ports for Soul Injectors.
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self::open(State::default_path(), window, cx)
+        let mut this = Self::open(State::default_path(), window, cx);
+        this.watch_ports(window, cx);
+        this
     }
 
     /// Builds the view with the state saved in `state_path` (none: nothing is
-    /// loaded or saved), and starts the background scans.
+    /// loaded or saved) and looks for GDB. It does not watch USB ports, so
+    /// tests built on it never open a Soul Injector plugged into the computer.
     pub fn open(state_path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (state, load_error) = match state_path.as_deref().map(State::load) {
             Some(Ok(state)) => (state, None),
@@ -289,22 +293,7 @@ impl AppView {
                 }
             }
         });
-        let ports_task = cx.spawn_in(window, async move |this, cx| {
-            loop {
-                let ports = cx
-                    .background_executor()
-                    .spawn(async { ports::list() })
-                    .await;
-                if this
-                    .update_in(cx, |this, window, cx| this.on_ports(ports, window, cx))
-                    .is_err()
-                {
-                    break;
-                }
-                cx.background_executor().timer(PORT_SCAN_INTERVAL).await;
-            }
-        });
-        this._tasks.extend([events_task, ports_task]);
+        this._tasks.push(events_task);
         this.scan_gdbs(window, cx);
 
         this._subscriptions.push(cx.on_app_quit(|this, cx| {
@@ -926,6 +915,26 @@ impl AppView {
     }
 
     // ---- Devices ---------------------------------------------------------------
+
+    /// Lists USB ports every few seconds to notice plugging and unplugging.
+    fn watch_ports(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let task = cx.spawn_in(window, async move |this, cx| {
+            loop {
+                let ports = cx
+                    .background_executor()
+                    .spawn(async { ports::list() })
+                    .await;
+                if this
+                    .update_in(cx, |this, window, cx| this.on_ports(ports, window, cx))
+                    .is_err()
+                {
+                    break;
+                }
+                cx.background_executor().timer(PORT_SCAN_INTERVAL).await;
+            }
+        });
+        self._tasks.push(task);
+    }
 
     fn on_ports(
         &mut self,

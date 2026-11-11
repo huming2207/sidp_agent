@@ -156,7 +156,8 @@ it clicks buttons, types into fields and picks variants with the keyboard, then
 checks the result: for example that each mode shows only its own page, that a
 filled-in target becomes a ready job and is saved, that deleting a profile
 asks first, that an invalid GDB port is not used, and that the simulated power
-preview records until stopped. These tests use a temporary state file, never your settings.
+preview records until stopped. These tests use a temporary state file, never
+your settings, and never open a Soul Injector plugged into the computer.
 
 The debug-session tests drive the worker against Soul Injector's real C++
 SIDP session (the same mock endpoint as the CLI's end-to-end tests), with the

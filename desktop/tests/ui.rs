@@ -1,8 +1,9 @@
 //! The main window driven like a user would: clicks and typing on the real
 //! components in a headless window, with results checked on the view.
 //!
-//! These need no device. They run against a state file in a temporary
-//! folder, never the user's settings.
+//! These need no device and never open one: the view they build does not
+//! watch USB ports. They run against a state file in a temporary folder,
+//! never the user's settings.
 use gpui_kit::test::{TestAppContextExt, TestEventExt, TestWindowExt};
 use gpui_kit::{
     AnyWindowHandle, AppContext, Bounds, Entity, Modifiers, MouseButton, Point, ScrollDelta,
@@ -438,12 +439,7 @@ async fn a_debug_session_leaves_a_recording_started_by_hand(cx: &mut TestAppCont
     .unwrap();
     run_until(cx, &view, |power| power.recording().len() >= 50);
 
-    // With no Soul Injector plugged in, the session ends at once. With one,
-    // it would really attach to the target, so the test stops here.
-    if cx.update(|cx| view.read(cx).selected_port().is_some()) {
-        eprintln!("skipped: a Soul Injector is plugged in");
-        return;
-    }
+    // The test view sees no Soul Injector, so the session ends at once.
     cx.update_window(window, |_, window, cx| {
         view.update(cx, |this, cx| {
             this.set_debug_option(cx, |o| {
