@@ -9,11 +9,30 @@ pub(super) struct Register {
 pub(super) struct Layout {
     pub registers: Vec<Register>,
     pub xml: String,
+    pub memory_map: String,
+}
+/// GDB uses hardware breakpoints only where the map says it cannot write. Flash
+/// is "rom" rather than "flash" because jobs program it, not GDB `load`.
+fn memory_map(info: &TargetInfo) -> String {
+    let mut xml = String::from(
+        "<?xml version=\"1.0\"?><!DOCTYPE memory-map PUBLIC \"+//IDN gnu.org//DTD GDB Memory Map V1.0//EN\" \"http://sourceware.org/gdb/gdb-memory-map.dtd\"><memory-map>",
+    );
+    for region in &info.regions {
+        xml.push_str(&format!(
+            "<memory type=\"{}\" start=\"{:#x}\" length=\"{:#x}\"/>",
+            if region.kind == 2 { "rom" } else { "ram" },
+            region.start,
+            region.end - region.start
+        ));
+    }
+    xml.push_str("</memory-map>");
+    xml
 }
 impl Layout {
     pub fn new(info: &TargetInfo) -> Self {
         let mut result = Self {
             registers: vec![],
+            memory_map: memory_map(info),
             xml: String::from(
                 "<?xml version=\"1.0\"?><!DOCTYPE target SYSTEM \"gdb-target.dtd\"><target version=\"1.0\"><architecture>arm</architecture><feature name=\"org.gnu.gdb.arm.m-profile\">",
             ),
@@ -94,6 +113,7 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::Region;
     fn info(profile: u8, capabilities: u32) -> TargetInfo {
         TargetInfo {
             profile,
@@ -102,6 +122,27 @@ mod tests {
             max_transfer: 64,
             regions: vec![],
         }
+    }
+    #[test]
+    fn flash_is_read_only_in_the_memory_map() {
+        let mut target = info(3, 0);
+        target.regions = vec![
+            Region {
+                start: 0x08000000,
+                end: 0x08040000,
+                kind: 2,
+                flags: 5,
+            },
+            Region {
+                start: 0x20000000,
+                end: 0x20010000,
+                kind: 1,
+                flags: 15,
+            },
+        ];
+        let map = Layout::new(&target).memory_map;
+        assert!(map.contains("<memory type=\"rom\" start=\"0x8000000\" length=\"0x40000\"/>"));
+        assert!(map.contains("<memory type=\"ram\" start=\"0x20000000\" length=\"0x10000\"/>"));
     }
     #[test]
     fn profiles_and_optional_fpu() {

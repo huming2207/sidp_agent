@@ -119,6 +119,16 @@ gdb.execute('maint flush register-cache')
 assert int(gdb.parse_and_eval('$pc')) == 0x08000000
 gdb.execute('monitor reset nrst')
 assert 'usage' in gdb.execute('monitor bogus', to_string=True)
+# The memory map makes GDB use hardware breakpoints in Flash without hbreak.
+gdb.execute('break *0x08000020')
+gdb.execute('continue')
+assert int(gdb.parse_and_eval('$pc')) == 0x08000020
+gdb.execute('delete breakpoints')
+# Internal breakpoints, as used by next and finish, take the same path.
+# advance also stops at the caller, so it needs a return address in Flash.
+gdb.execute('set $lr = 0x08000041')
+gdb.execute('advance *0x08000030')
+assert int(gdb.parse_and_eval('$pc')) == 0x08000030
 print('SIDP_E2E_OK')
 end
 detach
@@ -154,7 +164,7 @@ quit
         # Initial registers must be served from STOPPED, not fetched over SIDP.
         first_write = requests.index(0x14)
         assert 0x13 not in requests[:first_write], requests
-        assert requests.count(0x20) == 3 and 0x21 in requests, requests
+        assert requests.count(0x20) == 5 and 0x21 in requests, requests
         assert requests.count(0x22) == 2, requests
         print(f"PASS {label}: real GDB, fragmented CDC, C++ SIDP session ({len(requests)} requests)")
     finally:

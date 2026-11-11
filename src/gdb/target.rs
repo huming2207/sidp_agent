@@ -10,6 +10,7 @@ use gdbstub::target::{
             singlethread::{SingleThreadBase, SingleThreadResumeOps},
         },
         breakpoints::BreakpointsOps,
+        memory_map::{MemoryMap, MemoryMapOps},
         monitor_cmd::MonitorCmdOps,
         target_description_xml_override::{
             TargetDescriptionXmlOverride, TargetDescriptionXmlOverrideOps,
@@ -46,6 +47,20 @@ impl<T: Transport> Target for Adapter<T> {
     fn support_monitor_cmd(&mut self) -> Option<MonitorCmdOps<'_, Self>> {
         Some(self)
     }
+    fn support_memory_map(&mut self) -> Option<MemoryMapOps<'_, Self>> {
+        Some(self)
+    }
+}
+fn copy_xml(xml: &str, offset: u64, length: usize, out: &mut [u8]) -> usize {
+    let Some(bytes) = usize::try_from(offset)
+        .ok()
+        .and_then(|n| xml.as_bytes().get(n..))
+    else {
+        return 0;
+    };
+    let n = bytes.len().min(length).min(out.len());
+    out[..n].copy_from_slice(&bytes[..n]);
+    n
 }
 impl<T: Transport> TargetDescriptionXmlOverride for Adapter<T> {
     fn target_description_xml(
@@ -58,15 +73,17 @@ impl<T: Transport> TargetDescriptionXmlOverride for Adapter<T> {
         if annex != b"target.xml" {
             return Err(TargetError::NonFatal);
         }
-        let Some(bytes) = usize::try_from(offset)
-            .ok()
-            .and_then(|n| self.layout.xml.as_bytes().get(n..))
-        else {
-            return Ok(0);
-        };
-        let n = bytes.len().min(length).min(out.len());
-        out[..n].copy_from_slice(&bytes[..n]);
-        Ok(n)
+        Ok(copy_xml(&self.layout.xml, offset, length, out))
+    }
+}
+impl<T: Transport> MemoryMap for Adapter<T> {
+    fn memory_map_xml(
+        &self,
+        offset: u64,
+        length: usize,
+        buf: &mut [u8],
+    ) -> TargetResult<usize, Self> {
+        Ok(copy_xml(&self.layout.memory_map, offset, length, buf))
     }
 }
 impl<T: Transport> SingleThreadBase for Adapter<T> {
