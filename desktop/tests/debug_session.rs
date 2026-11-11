@@ -175,9 +175,14 @@ impl Gdb {
         Ok(byte[0])
     }
 
-    fn try_command(&mut self, payload: &str) -> std::io::Result<String> {
+    /// Sends a packet that gets no reply, such as a kill.
+    fn send(&mut self, payload: &str) {
         let sum = payload.bytes().fold(0u8, |a, b| a.wrapping_add(b));
-        write!(self.0, "${payload}#{sum:02x}")?;
+        write!(self.0, "${payload}#{sum:02x}").expect("send to the debug server");
+    }
+
+    fn try_command(&mut self, payload: &str) -> std::io::Result<String> {
+        self.send(payload);
         // Skip acknowledgements, then read one packet.
         while self.byte()? != b'$' {}
         let mut reply = Vec::new();
@@ -226,12 +231,16 @@ fn connection(endpoint: &Endpoint) -> Connection {
 }
 
 fn attach_plan(keep_serving: bool) -> Operation {
+    resuming_plan(keep_serving, false)
+}
+
+fn resuming_plan(keep_serving: bool, resume_on_detach: bool) -> Operation {
     Operation::Debug(DebugPlan {
         program: None,
         // Any free port; the Listening event tells which.
         port: 0,
         connect_under_reset: false,
-        resume_on_detach: false,
+        resume_on_detach,
         keep_serving,
     })
 }
@@ -293,10 +302,57 @@ fn notices_gdb_leaving_without_detach() {
     let mut gdb = Gdb::connect(address);
     events.command(&mut gdb, "?");
     drop(gdb);
-    events.log_containing("GDB disconnected without detaching");
+    events.log_containing("GDB disconnected without detaching; the target stays halted");
     // Keeps serving; stopping while nobody is connected ends cleanly.
     events.listening();
     worker.cancel();
+    assert_eq!(
+        events.finished(),
+        Outcome::Done("Debug server stopped".into())
+    );
+}
+
+#[test]
+#[ignore = "needs SIDP_MOCK_ENDPOINT"]
+fn reports_whether_gdb_leaves_the_target_running() {
+    let endpoint = Endpoint::start(&endpoint_path());
+    let (worker, mut events) = start(&endpoint, resuming_plan(true, true));
+
+    // A detach resumes the target, as configured.
+    let mut gdb = Gdb::connect(events.listening());
+    events.command(&mut gdb, "?");
+    assert_eq!(events.command(&mut gdb, "D"), "OK");
+    events.log_containing("GDB detached; the target is running");
+
+    // A kill leaves it halted, whatever the option says.
+    let mut gdb = Gdb::connect(events.listening());
+    events.command(&mut gdb, "?");
+    gdb.send("k");
+    events.log_containing("GDB detached; the target stays halted");
+
+    events.listening();
+    worker.cancel();
+    assert_eq!(
+        events.finished(),
+        Outcome::Done("Debug server stopped".into())
+    );
+}
+
+#[test]
+#[ignore = "needs SIDP_MOCK_ENDPOINT"]
+fn tries_to_resume_after_stopping_with_gdb_connected() {
+    let endpoint = Endpoint::start(&endpoint_path());
+    let (worker, mut events) = start(&endpoint, resuming_plan(false, true));
+    let mut gdb = Gdb::connect(events.listening());
+    events.command(&mut gdb, "?");
+    events.wait_for("connected", |e| {
+        matches!(e, Event::Gdb(GdbState::Connected(_))).then_some(())
+    });
+    worker.cancel();
+    // The mock cannot see a USB disconnect, so it still holds the first
+    // session and refuses the second attach. A real Soul Injector cleans up
+    // on disconnect and accepts it. Either way stopping completes.
+    events.log_containing("The target stays halted");
     assert_eq!(
         events.finished(),
         Outcome::Done("Debug server stopped".into())

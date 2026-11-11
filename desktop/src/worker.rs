@@ -574,15 +574,20 @@ fn debug(connection: &Connection, plan: &DebugPlan, r: &Reporter) -> Step<String
         r.step(format!("GDB connected from {peer}"));
         r.info("GDB connected");
         match bridge::serve(client, session, plan.resume_on_detach, r) {
-            bridge::End::Detached => r.info(if plan.resume_on_detach {
+            bridge::End::Detached { resumed } => r.info(if resumed {
                 "GDB detached; the target is running"
             } else {
                 "GDB detached; the target stays halted"
             }),
             bridge::End::GdbClosed => {
-                r.info("GDB disconnected without detaching; the Soul Injector released the target")
+                r.info("GDB disconnected without detaching; the target stays halted")
             }
-            bridge::End::Stopped => return Ok("Debug server stopped".into()),
+            bridge::End::Stopped => {
+                if plan.resume_on_detach {
+                    resume_after_stop(connection, r);
+                }
+                return Ok("Debug server stopped".into());
+            }
             bridge::End::Failed(message) => return Err(Stop::Failed(message)),
         }
         r.send(Event::Gdb(GdbState::Idle));
@@ -632,6 +637,25 @@ fn attach(mut session: DeviceSession, plan: &DebugPlan, r: &Reporter) -> Step<De
     };
     r.info(format!("Attached: {info}; {state}"));
     Ok(session)
+}
+
+/// Lets the target run after the server was stopped with GDB connected, as
+/// stopping before GDB connects does. Stopping closes the USB link, after
+/// which the Soul Injector keeps the target halted, so this attaches again
+/// and detaches with resume. The user already asked to stop, so this skips
+/// the cancellation checks; a failure only costs the resume.
+fn resume_after_stop(connection: &Connection, r: &Reporter) {
+    r.step("Letting the target run");
+    let resumed = connection.open().and_then(|mut session| {
+        session.attach()?;
+        session.detach(true)?;
+        Ok(())
+    });
+    match resumed {
+        Ok(()) => r.info("The target is running"),
+        Err(Stop::Failed(message)) => r.warn(format!("The target stays halted: {message}")),
+        Err(Stop::Cancelled) => {}
+    }
 }
 
 /// Waits for GDB to connect, keeping the USB link serviced. `None` when

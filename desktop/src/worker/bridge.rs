@@ -10,7 +10,7 @@
 use super::{DeviceSession, Reporter};
 use crate::describe;
 use gdbstub::stub::GdbStubError;
-use sidp_agent::session;
+use sidp_agent::{gdb::Served, session};
 use std::{
     error::Error,
     io::{self, Read, Write},
@@ -26,8 +26,11 @@ type StubError = GdbStubError<session::Error, io::Error>;
 /// How one GDB connection ended.
 #[derive(Debug, PartialEq, Eq)]
 pub enum End {
-    /// GDB detached; the target was released as configured.
-    Detached,
+    /// GDB detached or killed; `resumed` tells whether the target runs.
+    Detached {
+        /// The target was resumed rather than left halted.
+        resumed: bool,
+    },
     /// GDB closed the connection without detaching.
     GdbClosed,
     /// The user stopped the server.
@@ -77,7 +80,7 @@ fn relay(
     let end = loop {
         if !stopping && r.cancelled() {
             // `serve` sees GDB disconnect, and dropping its session
-            // deasserts DTR so the Soul Injector releases the target.
+            // deasserts DTR; the Soul Injector then keeps the target halted.
             stopping = true;
             let _ = client.shutdown(Shutdown::Both);
             let _ = upstream.shutdown(Shutdown::Both);
@@ -124,9 +127,13 @@ fn pump(name: &str, mut from: TcpStream, mut to: TcpStream) -> io::Result<JoinHa
 }
 
 /// Sorts `serve`'s result into GDB leaving, GDB detaching and real failures.
-fn classify(result: Result<u64, Box<dyn Error>>) -> End {
+fn classify(result: Result<Served, Box<dyn Error>>) -> End {
     let error = match result {
-        Ok(_) => return End::Detached,
+        Ok(served) => {
+            return End::Detached {
+                resumed: served.resumed,
+            };
+        }
         Err(error) => error,
     };
     // Socket errors from serve's own reads mean GDB went away.
@@ -166,7 +173,15 @@ mod tests {
 
     #[test]
     fn sorts_serve_results() {
-        assert_eq!(classify(Ok(3)), End::Detached);
+        let served = |resumed| Served {
+            resumed,
+            requests: 3,
+        };
+        assert_eq!(classify(Ok(served(true))), End::Detached { resumed: true });
+        assert_eq!(
+            classify(Ok(served(false))),
+            End::Detached { resumed: false }
+        );
         let eof: Box<dyn Error> = Box::new(io::Error::from(io::ErrorKind::UnexpectedEof));
         assert_eq!(classify(Err(eof)), End::GdbClosed);
         let lost: Box<dyn Error> = Box::new(session::Error::Status(12));

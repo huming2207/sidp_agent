@@ -57,7 +57,9 @@ and `sidp-agent gdb`.
    with the debug server. The options match the CLI's: connect under reset,
    resume on detach, and keep serving after GDB disconnects (for IDEs that
    restart debugging; in *Program, then debug* each new session starts from
-   reset without programming again).
+   reset without programming again). *Stop debugging* leaves the target as a
+   GDB detach would. A GDB `kill`, or GDB leaving without detaching, keeps it
+   halted.
 3. *Connect your debugger*: the GDB command line and settings for VS Code
    (Microsoft C/C++ and Cortex-Debug) and CLion, with paths and port filled
    in. ARM GDBs are found in `PATH` and the usual toolchain folders.
@@ -132,7 +134,8 @@ without a display:
 
 Each operation opens its own USB connection, as one CLI command does. Uploads
 use the same requests as `sidp_agent::manage::push_job`, with progress and
-cancellation added. Nothing in `sidp-agent` was changed for the app.
+cancellation added. The only change made to `sidp-agent` for the app is that
+`gdb::serve` reports whether it left the target running.
 
 ### Adding Windows
 
