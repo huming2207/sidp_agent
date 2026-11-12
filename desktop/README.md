@@ -72,7 +72,9 @@ Power Profiler. The Soul Injector does not supply or switch target power:
 feed VPP input (connector pin 11) from 3.3 V (pin 7) or a 1.8 to 3.6 V bench
 supply, and power the target from VPP output (pin 9).
 
-- Choose the sample rate and how long to record, then *Start*.
+- Choose the sample rate and how long to record, then *Start*. The rates are
+  the Soul Injector's: 227 and 909 samples per second, and 1.7 kS/s, the
+  fastest it reads, which can miss the odd conversion.
 - The chart shows current on a log or linear scale. As in the Power
   Profiler, the mouse wheel zooms time around the pointer, dragging pans
   (and stops following new samples; *Back to newest* resumes), and sideways
@@ -84,12 +86,17 @@ supply, and power the target from VPP output (pin 9).
 - *Export CSV* saves the selection, or everything, as
   `time_s,current_a,supply_v,range`.
 
-The power protocol between the PC and the Soul Injector is not designed yet,
-so *Measure from: Soul Injector* explains that and stops. *Simulated preview*
-generates a low-power MCU's waveform (a few µA asleep, wake-ups and radio
-bursts) so the page can be tried; it is labelled as simulated wherever it is
-shown. The sample rates offered are placeholders until the protocol fixes
-them, and *Zero offset* is shown but disabled until then.
+*Measure from: Soul Injector* records over the same USB connection as
+everything else, so while it records the Soul Injector is busy: to measure
+during debugging, turn on *Measure power during the session* on the Debug page
+instead. The current is corrected by the zero offset: with nothing connected
+to `VPP_OUTPUT`, *Zero offset* measures what each range reads on its own
+(mostly the sensors' input bias) and the app subtracts it from later
+recordings of that Soul Injector. Samples are placed by the device's clock, so
+time and charge stay right even when a conversion is missed. *Simulated
+preview* generates a low-power MCU's waveform (a few µA asleep, wake-ups and
+radio bursts) so the page can be tried without a device; it is labelled as
+simulated wherever it is shown.
 
 The left column shows the device's serial number, firmware, storage, job and
 last result, and pulls the production log (appended as JSON Lines to the file
@@ -127,15 +134,16 @@ without a display:
 | `snippets` | GDB, VS Code and CLion settings for the running server. |
 | `worker` | Runs one device operation at a time on a background thread and reports events. |
 | `worker::bridge` | Puts `sidp_agent::gdb::serve` behind a loopback relay so the app can see GDB connect and can stop a session. |
-| `power` | Power recordings: statistics, chart envelopes, CSV export, and capture sources (the device, and the simulated preview). |
+| `worker::power` | Records power on the worker's connection, alone or during a debug session, and measures the zero offset. |
+| `power` | Power recordings: statistics, chart envelopes, CSV export, the simulated preview, and placing device samples on the recording's time grid. |
 | `describe` | Plain-language text for device statuses and run results. |
 | `platform` | Everything that differs between operating systems. |
 | `ui` | The GPUI Kit views. `ui::app` holds state and behavior; the rest only draws. |
 
 Each operation opens its own USB connection, as one CLI command does. Uploads
 use the same requests as `sidp_agent::manage::push_job`, with progress and
-cancellation added. The only change made to `sidp-agent` for the app is that
-`gdb::serve` reports whether it left the target running.
+cancellation added. Power data arrives on the debug connection, through the
+session's power sink.
 
 ### Adding Windows
 
@@ -171,8 +179,15 @@ SIDP_MOCK_ENDPOINT=/tmp/mock-endpoint cargo test -- --include-ignored
 ```
 
 They cover a clean detach, attaching again for the next GDB session, GDB
-leaving without detaching, and stopping the server with and without GDB
-connected.
+leaving without detaching, stopping the server with and without GDB
+connected, and debugging on when the device cannot measure power.
+
+`tests/hardware.rs` records power from a real Soul Injector with a profiler
+(Rev 8), alone and during a debug session:
+
+```sh
+SIDP_DEVICE=/dev/ttyACM0 cargo test --test hardware -- --ignored --test-threads 1
+```
 
 ## License
 

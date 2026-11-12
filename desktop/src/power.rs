@@ -7,9 +7,10 @@
 //! moves back down. Each sample therefore carries the range it was
 //! measured in.
 //!
-//! The protocol that carries samples from the device is not decided yet.
-//! [`Source::SoulInjector`] reports that, and [`Source::Simulated`] produces
-//! a realistic waveform so the interface can be tried without a device.
+//! Samples from the Soul Injector come through the device worker, which owns
+//! the USB connection: it fills a [`DeviceFeed`] that the view reads like any
+//! other capture. [`Source::Simulated`] produces a realistic waveform so the
+//! interface can be tried without a device.
 use std::{
     io::{self, Write},
     sync::{
@@ -55,9 +56,34 @@ impl Range {
     }
 }
 
-/// Sample rates offered, in samples per second. Tentative until the
-/// protocol is decided; an INA226 converts in 140 µs at the fastest.
-pub const SAMPLE_RATES: [u32; 3] = [100, 1_000, 3_500];
+/// Sample rates offered, in samples per second. Each is one of the Soul
+/// Injector's settings; see [`DeviceSetting::for_rate`].
+pub const SAMPLE_RATES: [u32; 3] = [227, 909, 1_700];
+
+/// How the Soul Injector samples: an INA226 conversion time, averaged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceSetting {
+    /// Conversion time in microseconds.
+    pub conversion_us: u32,
+    /// Conversions averaged into one sample.
+    pub averages: u32,
+}
+
+impl DeviceSetting {
+    /// The setting behind a rate from [`SAMPLE_RATES`]. 1.7 kS/s is the
+    /// fastest the device reads, and can miss the odd conversion.
+    pub fn for_rate(rate: u32) -> Self {
+        let (conversion_us, averages) = match rate {
+            ..=227 => (1100, 4),
+            228..=909 => (1100, 1),
+            _ => (588, 1),
+        };
+        Self {
+            conversion_us,
+            averages,
+        }
+    }
+}
 
 /// Recording lengths offered; `None` records until stopped.
 pub const DURATIONS: [Option<Duration>; 4] = [
@@ -318,6 +344,69 @@ pub enum CaptureEvent {
     Ended(Result<(), String>),
 }
 
+/// What the device worker needs to record into a view: the setting, how
+/// long, the zero correction, and where samples go.
+#[derive(Clone)]
+pub struct DeviceFeed {
+    /// Samples per second of the recording the samples go into.
+    pub rate: u32,
+    /// Sampling setting.
+    pub setting: DeviceSetting,
+    /// Recording length; `None` records until stopped.
+    pub duration: Option<Duration>,
+    /// Zero correction for this device.
+    pub zero: sidp_agent::power::Zero,
+    /// Where samples and the end go.
+    pub events: Sender<CaptureEvent>,
+    /// Set when the user stops the recording.
+    pub stop: Arc<AtomicBool>,
+}
+
+impl DeviceFeed {
+    /// Whether the user stopped the recording.
+    pub fn stopped(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+}
+
+/// Places device samples, which carry their own times, on a recording's
+/// fixed-rate grid. Each sample is the average over its conversion, so it
+/// fills the grid points since the previous one, including any gap before it.
+pub struct Resampler {
+    rate: f64,
+    next: u64,
+}
+
+impl Resampler {
+    /// A resampler for a recording at `rate` samples per second.
+    pub fn new(rate: u32) -> Self {
+        Self {
+            rate: f64::from(rate.max(1)),
+            next: 0,
+        }
+    }
+
+    /// Appends grid samples up to the time of each device sample.
+    pub fn push(&mut self, samples: &[sidp_agent::power::Sample], out: &mut Vec<Sample>) {
+        for sample in samples {
+            let point = Sample {
+                current: sample.current_a as f32,
+                supply: sample.vin_v as f32,
+                range: match sample.range {
+                    sidp_agent::power::Range::Low => Range::Low,
+                    sidp_agent::power::Range::Mid => Range::Mid,
+                    sidp_agent::power::Range::High => Range::High,
+                },
+            };
+            let end = (sample.t_s * self.rate).round().max(0.0) as u64;
+            while self.next <= end {
+                out.push(point);
+                self.next += 1;
+            }
+        }
+    }
+}
+
 /// A running capture.
 pub struct Capture {
     stop: Arc<AtomicBool>,
@@ -339,10 +428,10 @@ impl Capture {
             .name("power".into())
             .spawn(move || {
                 let result = match source {
-                    Source::SoulInjector => Err(
-                        "Power measurement over USB is not available yet: its protocol is still being designed. Use the simulated preview to try this page."
-                            .to_owned(),
-                    ),
+                    // The view hands device recordings to the worker instead.
+                    Source::SoulInjector => {
+                        Err("The Soul Injector records through its own connection.".to_owned())
+                    }
                     Source::Simulated => {
                         simulate(rate.max(1), duration, &flag, &events);
                         Ok(())
@@ -355,6 +444,12 @@ impl Capture {
             stop,
             thread: Some(thread),
         }
+    }
+
+    /// A capture that another thread produces, such as the device worker;
+    /// `stop` is how it learns to stop.
+    pub fn external(stop: Arc<AtomicBool>) -> Self {
+        Self { stop, thread: None }
     }
 
     /// Asks the capture to stop; an `Ended` event follows.
@@ -614,13 +709,46 @@ mod tests {
         assert_eq!(format_time(83.0), "1:23");
     }
 
+    fn device_sample(t_s: f64, current_a: f64) -> sidp_agent::power::Sample {
+        sidp_agent::power::Sample {
+            t_s,
+            current_a,
+            vin_v: 3.3,
+            vout_v: 3.3,
+            range: sidp_agent::power::Range::Mid,
+            settling: false,
+            gap_before: false,
+        }
+    }
+
     #[test]
-    fn the_device_source_explains_itself() {
-        let (sender, receiver) = std::sync::mpsc::channel();
-        drop(Capture::start(Source::SoulInjector, 1000, None, sender));
-        match receiver.try_recv() {
-            Ok(CaptureEvent::Ended(Err(reason))) => assert!(reason.contains("not available yet")),
-            other => panic!("{other:?}"),
+    fn resampling_keeps_device_time() {
+        // A device slightly slower than nominal, and a missed sample: the
+        // grid still advances with time, so charge stays right.
+        let mut resampler = Resampler::new(1000);
+        let mut out = Vec::new();
+        resampler.push(
+            &[
+                device_sample(0.0011, 1e-3),
+                device_sample(0.0022, 2e-3),
+                device_sample(0.0055, 3e-3),
+            ],
+            &mut out,
+        );
+        // Grid points 0-1 ms take the first sample, 2 ms the second, and
+        // 3-6 ms (5.5 ms rounds up) the one after the missed conversion.
+        let currents: Vec<f32> = out.iter().map(|s| s.current).collect();
+        assert_eq!(currents, [1e-3, 1e-3, 2e-3, 3e-3, 3e-3, 3e-3, 3e-3]);
+        assert_eq!(out[0].range, Range::Mid);
+        assert_eq!(out[0].supply, 3.3);
+    }
+
+    #[test]
+    fn device_settings_match_the_offered_rates() {
+        for rate in SAMPLE_RATES {
+            let setting = DeviceSetting::for_rate(rate);
+            let actual = 1e6 / f64::from(setting.conversion_us * setting.averages);
+            assert!((actual - f64::from(rate)).abs() < 1.0, "{rate}: {actual}");
         }
     }
 

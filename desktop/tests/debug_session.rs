@@ -14,7 +14,10 @@
 
 use futures::channel::mpsc::{TryRecvError, UnboundedReceiver, unbounded};
 use serialport::{SerialPort, TTYPort};
-use sidp_desktop::worker::{Connection, DebugPlan, Event, GdbState, Operation, Outcome, Worker};
+use sidp_desktop::{
+    power::{CaptureEvent, DeviceFeed, DeviceSetting},
+    worker::{Connection, DebugPlan, Event, GdbState, Operation, Outcome, Worker},
+};
 use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
@@ -242,6 +245,7 @@ fn resuming_plan(keep_serving: bool, resume_on_detach: bool) -> Operation {
         connect_under_reset: false,
         resume_on_detach,
         keep_serving,
+        power: None,
     })
 }
 
@@ -387,4 +391,37 @@ fn stops_cleanly_before_gdb_connects() {
     );
     // The port is free again for the next session.
     TcpListener::bind(address).expect("port released");
+}
+
+#[test]
+#[ignore = "needs SIDP_MOCK_ENDPOINT"]
+fn debugging_goes_on_when_the_device_cannot_measure_power() {
+    let endpoint = Endpoint::start(&endpoint_path());
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let feed = DeviceFeed {
+        rate: 909,
+        setting: DeviceSetting::for_rate(909),
+        duration: None,
+        zero: Default::default(),
+        events: sender,
+        stop: Default::default(),
+    };
+    let Operation::Debug(mut plan) = attach_plan(false) else {
+        unreachable!()
+    };
+    plan.power = Some(feed);
+    let (worker, mut events) = start(&endpoint, Operation::Debug(plan));
+
+    // The mock endpoint answers the power opcodes as unsupported.
+    events.log_containing("This Soul Injector cannot measure power.");
+    match receiver.recv_timeout(Duration::from_secs(5)) {
+        Ok(CaptureEvent::Ended(Err(message))) => assert!(message.contains("cannot measure power")),
+        other => panic!("{other:?}"),
+    }
+    events.listening();
+    worker.cancel();
+    assert_eq!(
+        events.finished(),
+        Outcome::Done("Debug server stopped".into())
+    );
 }

@@ -435,7 +435,7 @@ async fn the_simulated_preview_records_until_stopped(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-async fn the_soul_injector_source_explains_it_is_not_ready(cx: &mut TestAppContext) {
+async fn recording_without_a_soul_injector_says_what_is_missing(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (window, view) = open(cx, &dir.path().join("state.json"));
     cx.update_window(window, |_, window, cx| {
@@ -453,7 +453,8 @@ async fn the_soul_injector_source_explains_it_is_not_ready(cx: &mut TestAppConte
             .error()
             .unwrap_or_default()
             .to_owned();
-        assert!(error.contains("not available yet"), "{error}");
+        // The tests never open a device, so none is connected.
+        assert!(error.contains("Connect a Soul Injector"), "{error}");
     });
 }
 

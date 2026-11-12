@@ -10,7 +10,8 @@ use super::{
 use crate::{
     platform,
     power::{
-        self, Capture, CaptureEvent, DURATIONS, Range, Recording, SAMPLE_RATES, Source, Stats,
+        self, Capture, CaptureEvent, DURATIONS, DeviceFeed, DeviceSetting, Range, Recording,
+        SAMPLE_RATES, Source, Stats,
     },
     worker::Level,
 };
@@ -30,7 +31,7 @@ use gpui_kit::{
     TestSupportExt as _, Window, canvas, div, fill, point, prelude::FluentBuilder as _, px,
     relative,
 };
-use std::sync::mpsc;
+use std::sync::{Arc, atomic::AtomicBool, mpsc};
 use std::{cell::Cell, path::PathBuf, rc::Rc, time::Duration};
 
 /// Time windows offered, in seconds; `None` shows the whole recording.
@@ -50,6 +51,18 @@ const AXIS_WIDTH: f32 = 64.;
 /// The lowest and highest currents the chart shows.
 const FLOOR: f64 = 1e-8;
 const CEILING: f64 = 2.0;
+
+/// What the view needs the app to do, because it involves the device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PowerRequest {
+    /// Record from the Soul Injector: call [`PowerView::begin_device`] and
+    /// hand the feed to the device worker.
+    StartDevice,
+    /// Measure the zero offset.
+    MeasureZero,
+}
+
+impl gpui_kit::EventEmitter<PowerRequest> for PowerView {}
 
 /// Power measurement state and its view.
 pub struct PowerView {
@@ -111,6 +124,11 @@ impl PowerView {
         &self.recording
     }
 
+    /// Where recordings come from.
+    pub fn source(&self) -> Source {
+        self.source
+    }
+
     /// Whether a capture is running.
     pub fn is_capturing(&self) -> bool {
         self.capture.is_some()
@@ -143,23 +161,64 @@ impl PowerView {
         }
     }
 
-    /// Starts a new recording.
+    /// Starts a new recording. The Soul Injector is asked for through the
+    /// app, which owns the device.
     pub fn start(&mut self, cx: &mut Context<Self>) {
         if self.is_capturing() {
             return;
         }
+        if self.source == Source::SoulInjector {
+            cx.emit(PowerRequest::StartDevice);
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let capture = Capture::start(self.source, self.rate, self.duration, sender);
+        self.begin(capture, receiver, cx);
+    }
+
+    /// Starts a recording from the Soul Injector and returns what the device
+    /// worker fills it through; `None` while already recording.
+    pub fn begin_device(
+        &mut self,
+        zero: sidp_agent::power::Zero,
+        cx: &mut Context<Self>,
+    ) -> Option<DeviceFeed> {
+        if self.is_capturing() {
+            return None;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let feed = DeviceFeed {
+            rate: self.rate,
+            setting: DeviceSetting::for_rate(self.rate),
+            duration: self.duration,
+            zero,
+            events: sender,
+            stop: stop.clone(),
+        };
+        self.source = Source::SoulInjector;
+        self.begin(Capture::external(stop), receiver, cx);
+        Some(feed)
+    }
+
+    /// Shows why a recording could not start.
+    pub fn fail(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.error = Some(message.into());
+        cx.notify();
+    }
+
+    fn begin(
+        &mut self,
+        capture: Capture,
+        receiver: mpsc::Receiver<CaptureEvent>,
+        cx: &mut Context<Self>,
+    ) {
         self.recording = Recording::new(self.rate);
         self.selection = None;
         self.drag_from = None;
         self.end = None;
         self.error = None;
-        let (sender, receiver) = mpsc::channel();
-        self.capture = Some(Capture::start(
-            self.source,
-            self.rate,
-            self.duration,
-            sender,
-        ));
+        self.capture = Some(capture);
         self.events = Some(receiver);
         // Samples are picked up on a timer rather than by waking the UI from
         // the capture thread, so updates arrive in steady batches.
@@ -871,9 +930,10 @@ impl PowerView {
                     Button::new("power-zero")
                         .ghost()
                         .small()
-                        .label("Zero offset…")
-                        .disabled(true)
-                        .tooltip("Measures the offset with no target attached, then subtracts it. Arrives with the power protocol."),
+                        .label("Zero offset")
+                        .disabled(self.source != Source::SoulInjector || self.is_capturing())
+                        .tooltip("With nothing connected to VPP_OUTPUT (PROG pin 9), measures what each range reads and subtracts it from later recordings.")
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(PowerRequest::MeasureZero))),
                 )
                 .child(
                     Button::new("power-export")

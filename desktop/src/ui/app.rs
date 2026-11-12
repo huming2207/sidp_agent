@@ -1,9 +1,10 @@
 //! State and behavior of the main window. Rendering is in the sibling
 //! modules; this one decides what happens.
-use super::power::PowerView;
+use super::power::{PowerRequest, PowerView};
 use crate::{
     describe, platform,
     ports::{self, Port},
+    power::Source,
     profile::{DebugMode, Mode, Profile, State},
     snippets::{self, Client, DebugTarget},
     target::{self, BuiltJob, Family, TargetSummary},
@@ -51,6 +52,10 @@ pub enum Activity {
     PullLog,
     /// Serving GDB.
     Debug,
+    /// Recording power from the Soul Injector.
+    Power,
+    /// Measuring the power profiler's zero offset.
+    PowerZero,
 }
 
 /// The operation in progress.
@@ -277,6 +282,11 @@ impl AppView {
                     cx.notify();
                 }
             }));
+        this._subscriptions.push(
+            cx.subscribe(&this.power, |this, _, request: &PowerRequest, cx| {
+                this.on_power_request(*request, cx)
+            }),
+        );
         this.subscribe(window, cx);
         this.load_profile(window, cx);
         this.load_settings(window, cx);
@@ -1152,9 +1162,18 @@ impl AppView {
         }
         let options = self.state.profile().debug.clone();
         // A recording the user started is theirs: the session neither
-        // restarts it nor stops it.
+        // restarts it nor stops it. Soul Injector samples come over the debug
+        // connection itself; the simulated preview runs alongside.
+        let mut feed = None;
         if options.measure_power && !self.is_busy() && !self.power.read(cx).is_capturing() {
-            self.power.update(cx, |power, cx| power.start(cx));
+            if self.power.read(cx).source() == Source::SoulInjector {
+                let zero = self.power_zero();
+                feed = self
+                    .power
+                    .update(cx, |power, cx| power.begin_device(zero, cx));
+            } else {
+                self.power.update(cx, |power, cx| power.start(cx));
+            }
             self.power_with_debug = true;
         }
         let plan = move |program: Option<BuiltJob>| DebugPlan {
@@ -1163,6 +1182,7 @@ impl AppView {
             connect_under_reset: options.connect_under_reset,
             resume_on_detach: options.resume_on_detach,
             keep_serving: options.keep_serving,
+            power: feed,
         };
         match self.state.profile().debug.mode {
             DebugMode::ProgramThenDebug => self.start_with_job(
@@ -1241,6 +1261,10 @@ impl AppView {
                 self.device_error = None;
             }
             Event::Gdb(state) => self.gdb_state = state,
+            Event::PowerZero { serial, zero } => {
+                self.state.settings.power_zero.insert(serial, zero);
+                self.save_soon(cx);
+            }
             Event::Finished(outcome) => self.on_finished(outcome, window, cx),
         }
         cx.notify();
@@ -1260,7 +1284,7 @@ impl AppView {
             Outcome::Done(message) if message.is_empty() => {}
             Outcome::Done(message) => {
                 self.add_log(Level::Success, message.clone());
-                if activity != Activity::Debug {
+                if !matches!(activity, Activity::Debug | Activity::Power) {
                     window.push_notification(Notification::success(message), cx);
                 }
             }
@@ -1283,6 +1307,45 @@ impl AppView {
         } else {
             window.push_notification(Notification::error(message), cx);
         }
+    }
+
+    /// Asks for what the power view cannot do on its own.
+    fn on_power_request(&mut self, request: PowerRequest, cx: &mut Context<Self>) {
+        let blocker = if self.is_busy() {
+            Some("The Soul Injector is busy. Wait for it to finish, or stop what it is doing.")
+        } else {
+            self.device_blocker()
+        };
+        if let Some(blocker) = blocker {
+            self.power.update(cx, |power, cx| power.fail(blocker, cx));
+            return;
+        }
+        match request {
+            PowerRequest::StartDevice => {
+                let zero = self.power_zero();
+                if let Some(feed) = self
+                    .power
+                    .update(cx, |power, cx| power.begin_device(zero, cx))
+                {
+                    self.start(Activity::Power, Operation::Power(feed), cx);
+                }
+            }
+            PowerRequest::MeasureZero => {
+                self.add_log(
+                    Level::Info,
+                    "Measuring the zero offset; nothing may be connected to VPP_OUTPUT (PROG pin 9)",
+                );
+                self.start(Activity::PowerZero, Operation::PowerZero, cx);
+            }
+        }
+    }
+
+    /// The zero correction measured for the connected Soul Injector.
+    fn power_zero(&self) -> sidp_agent::power::Zero {
+        self.device_snapshot()
+            .and_then(|device| self.state.settings.power_zero.get(&device.info.serial))
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Stops a power capture that was started with the debug session.

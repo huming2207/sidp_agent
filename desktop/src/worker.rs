@@ -4,7 +4,11 @@
 //! [`Event`]s while it runs. Every operation opens its own USB connection
 //! and closes it when done, like one command-line invocation. Nothing is
 //! retried on the same connection: a failed request ends the operation.
-use crate::{describe, target::BuiltJob};
+use crate::{
+    describe,
+    power::{CaptureEvent, DeviceFeed},
+    target::BuiltJob,
+};
 use futures::channel::mpsc::UnboundedSender;
 use sidp_agent::{
     manage::{
@@ -12,6 +16,7 @@ use sidp_agent::{
         proto::{DeviceInfo, JobStatus, RunResult, Trigger},
     },
     ntp,
+    power::Zero,
     session::{self, ResetKind, Session},
     transport::UsbCdc,
 };
@@ -29,6 +34,7 @@ use std::{
 };
 
 mod bridge;
+mod power;
 
 /// An open USB connection to a Soul Injector.
 pub type DeviceSession = Session<UsbCdc>;
@@ -77,6 +83,8 @@ pub struct DebugPlan {
     pub resume_on_detach: bool,
     /// Keep listening for the next GDB session after one ends.
     pub keep_serving: bool,
+    /// Measure power while connected to the device.
+    pub power: Option<DeviceFeed>,
 }
 
 /// A device operation.
@@ -105,6 +113,10 @@ pub enum Operation {
     },
     /// Serve GDB.
     Debug(DebugPlan),
+    /// Record power into a view.
+    Power(DeviceFeed),
+    /// Measure the power profiler's zero offset; nothing may be on VPP_OUTPUT.
+    PowerZero,
 }
 
 /// Importance of a log line.
@@ -166,6 +178,13 @@ pub enum Event {
     Device(DeviceSnapshot),
     /// The GDB server changed state.
     Gdb(GdbState),
+    /// A zero offset was measured for the device with this serial number.
+    PowerZero {
+        /// Device serial number.
+        serial: String,
+        /// The correction.
+        zero: Zero,
+    },
     /// The operation ended; no events follow.
     Finished(Outcome),
 }
@@ -324,7 +343,58 @@ fn run(connection: &Connection, operation: Operation, r: &Reporter) -> Step<Stri
             finish_run(&result)
         }
         Operation::PullLog { output } => pull_log(connection, &output, r),
-        Operation::Debug(plan) => debug(connection, &plan, r),
+        Operation::Debug(plan) => {
+            let result = debug(connection, &plan, r);
+            if let Some(feed) = &plan.power {
+                end_feed(feed, &result);
+            }
+            result
+        }
+        Operation::Power(feed) => {
+            let result =
+                open(connection, r).and_then(|mut session| power::record(&mut session, &feed, r));
+            end_feed(&feed, &result);
+            result
+        }
+        Operation::PowerZero => {
+            let mut session = open(connection, r)?;
+            let serial = session.device_info()?.serial;
+            let zero = power::measure_zero(&mut session, r)?;
+            r.send(Event::PowerZero { serial, zero });
+            let [low, mid, high] = zero.amps_per_volt.map(|a| a * 3.3e6);
+            Ok(format!(
+                "Zero offset at 3.3 V: LOW {low:.2} µA, MID {mid:.2} µA, HIGH {high:.1} µA"
+            ))
+        }
+    }
+}
+
+/// Tells the view its recording ended; a second end is ignored there.
+fn end_feed<T>(feed: &DeviceFeed, result: &Step<T>) {
+    let ended = match result {
+        Err(Stop::Failed(message)) => Err(message.clone()),
+        _ => Ok(()),
+    };
+    let _ = feed.events.send(CaptureEvent::Ended(ended));
+}
+
+/// Starts power measurement on a debug connection. A failure only costs
+/// the measurement, not the debug session.
+fn start_debug_power(
+    session: &mut DeviceSession,
+    plan: &DebugPlan,
+    timeline: Option<&Arc<std::sync::Mutex<power::Timeline>>>,
+    r: &Reporter,
+) {
+    let (Some(feed), Some(timeline)) = (&plan.power, timeline) else {
+        return;
+    };
+    if feed.stopped() {
+        return;
+    }
+    if let Err(Stop::Failed(message)) = power::start(session, feed, timeline, r) {
+        r.warn(message.clone());
+        let _ = feed.events.send(CaptureEvent::Ended(Err(message)));
     }
 }
 
@@ -546,7 +616,10 @@ fn debug(connection: &Connection, plan: &DebugPlan, r: &Reporter) -> Step<String
         let text = finish_run(&result)?;
         r.log(Level::Success, text);
     }
-    let mut session = Some(attach(session, plan, r)?);
+    let mut session = attach(session, plan, r)?;
+    let timeline = plan.power.as_ref().map(power::Timeline::new);
+    start_debug_power(&mut session, plan, timeline.as_ref(), r);
+    let mut session = Some(session);
 
     loop {
         r.send(Event::Gdb(GdbState::Listening(address)));
@@ -562,7 +635,10 @@ fn debug(connection: &Connection, plan: &DebugPlan, r: &Reporter) -> Step<String
         let session = match session.take() {
             Some(session) => session,
             None => match open(connection, r).and_then(|s| attach(s, plan, r)) {
-                Ok(session) => session,
+                Ok(mut session) => {
+                    start_debug_power(&mut session, plan, timeline.as_ref(), r);
+                    session
+                }
                 Err(stop) => {
                     // GDB sees the connection close.
                     let _ = client.shutdown(std::net::Shutdown::Both);

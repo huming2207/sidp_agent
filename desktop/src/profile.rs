@@ -134,7 +134,7 @@ impl Profile {
 }
 
 /// Settings shared by every profile.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// GDB executable; detected when unset.
@@ -149,6 +149,8 @@ pub struct Settings {
     pub log_file: Option<PathBuf>,
     /// Dark (`true`) or light theme; follows the system when unset.
     pub dark: Option<bool>,
+    /// Power profiler zero correction, by device serial number.
+    pub power_zero: BTreeMap<String, sidp_agent::power::Zero>,
 }
 
 impl Default for Settings {
@@ -160,6 +162,7 @@ impl Default for Settings {
             settle_ms: 250,
             log_file: None,
             dark: None,
+            power_zero: BTreeMap::new(),
         }
     }
 }
@@ -176,7 +179,7 @@ impl Settings {
 }
 
 /// Everything the app remembers between runs.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct State {
     /// File format version.
