@@ -137,7 +137,9 @@ impl DataFrame {
                 .get(at..at + count * RAW_SAMPLE)
                 .ok_or_else(|| invalid("short POWER_DATA samples"))?;
             let samples = bytes
-                .chunks_exact(RAW_SAMPLE)
+                .as_chunks::<RAW_SAMPLE>()
+                .0
+                .iter()
                 .map(|raw| RawSample {
                     shunt: i16::from_le_bytes([raw[0], raw[1]]),
                     bus: u16_at(raw, 2),
