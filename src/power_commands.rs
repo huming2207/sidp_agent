@@ -138,7 +138,7 @@ pub fn record(
     out.flush()?;
 
     let (event, _) = stopped.unwrap();
-    summary.print(event.dropped_frames);
+    summary.print(event.dropped_frames, session.dropped_frames());
     let reason = event.reason();
     if reason != StopReason::StopDuration {
         return Err(format!(
@@ -204,7 +204,7 @@ impl Summary {
         self.last_t_s = s.t_s;
     }
 
-    fn print(&self, dropped_frames: u32) {
+    fn print(&self, dropped_frames: u32, damaged_frames: u64) {
         if self.count == 0 {
             println!("No samples received");
             return;
@@ -228,7 +228,7 @@ impl Summary {
             self.min_vin
         );
         println!(
-            "Gaps: {}, frames dropped by the device: {dropped_frames}",
+            "Gaps: {}, frames dropped by the device: {dropped_frames}, damaged on the wire: {damaged_frames}",
             self.gaps
         );
     }

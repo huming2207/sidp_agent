@@ -9,7 +9,8 @@ import tty
 
 
 def scenarios(agent, endpoint, output, pump):
-    """USB loss, corrupt incoming frame, and debugger EOF must terminate promptly."""
+    """USB loss and debugger EOF must terminate promptly. A corrupt incoming
+    frame is dropped, as SIDP requires: the session goes on, and nothing is replayed."""
     for fault in ("usb-loss", "bad-crc", "gdb-eof"):
         master, slave = pty.openpty()
         tty.setraw(slave)
@@ -46,12 +47,20 @@ def scenarios(agent, endpoint, output, pump):
                     host, port = address.rsplit(":", 1)
                     with socket.create_connection((host, int(port)), timeout=3):
                         pass
-                assert proc.wait(timeout=5) != 0, f"{fault}: CLI incorrectly reported success"
+                if fault == "bad-crc":
+                    try:
+                        proc.wait(timeout=2)
+                        raise AssertionError("bad-crc: a dropped frame ended the session")
+                    except subprocess.TimeoutExpired:
+                        pass
+                else:
+                    assert proc.wait(timeout=5) != 0, f"{fault}: CLI incorrectly reported success"
                 mock_log.flush()
                 requests = [line for line in (output / f"{fault}-endpoint.log").read_text().splitlines()
                             if line.startswith("REQUEST ")]
                 assert requests == ["REQUEST 1"], f"{fault}: requests replayed: {requests}"
-                print(f"PASS {fault}: process exits, no operation replay")
+                outcome = "frame dropped, session kept" if fault == "bad-crc" else "process exits"
+                print(f"PASS {fault}: {outcome}, no operation replay")
         finally:
             stop.set()
             for proc in reversed(processes):

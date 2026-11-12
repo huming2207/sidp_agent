@@ -1,8 +1,10 @@
 //! Single-request SIDP session, stop snapshots and desired hardware breakpoints.
 //!
-//! A session owns exactly one physical connection. Timeout, corrupt framing,
-//! mismatched responses and target loss invalidate all cached state and close
-//! that connection; ambiguous operations are never retried. No speculative
+//! A session owns exactly one physical connection. Timeout, malformed
+//! payloads, mismatched responses and target loss invalidate all cached state
+//! and close that connection; ambiguous operations are never retried. Frames
+//! damaged on the wire are dropped by the transport, so a damaged response
+//! ends in its request's timeout. No speculative
 //! prefetch is performed in this milestone.
 use crate::{
     codec::{self, Frame, Reader, invalid},
@@ -99,6 +101,10 @@ impl<T: Transport> Session<T> {
     /// Number of wire requests sent, for auditing snapshot/cache effectiveness.
     pub fn request_count(&self) -> u64 {
         self.requests
+    }
+    /// Frames dropped by the transport because they were damaged on the wire.
+    pub fn dropped_frames(&self) -> u64 {
+        self.transport.dropped_frames()
     }
     /// Whether the connection is permanently closed.
     pub fn is_closed(&self) -> bool {

@@ -14,6 +14,10 @@ use std::{
 /// an idle timeout and must preserve partial framing across calls. Fatal I/O
 /// errors must not be hidden as idle timeouts. No implementation may reconnect
 /// or replay frames automatically. A fresh physical connection needs a new session.
+///
+/// A frame that fails validation (size, version or CRC) is dropped, as SIDP
+/// requires: its request ID cannot be trusted, so a lost response surfaces as
+/// that request's timeout, and lost power data as a sequence gap.
 pub trait Transport {
     /// Send a complete frame within the given time budget.
     fn send(&mut self, frame: &Frame, timeout: Duration) -> io::Result<()>;
@@ -21,6 +25,10 @@ pub trait Transport {
     fn receive(&mut self, timeout: Duration) -> io::Result<Option<Frame>>;
     /// Close this connection. Must be safe to call more than once.
     fn close(&mut self);
+    /// Frames dropped because they failed validation.
+    fn dropped_frames(&self) -> u64 {
+        0
+    }
 }
 
 /// USB CDC serial connection with bounded SLIP decoding and explicit DTR control.
@@ -29,6 +37,7 @@ pub struct UsbCdc {
     decoder: SlipDecoder,
     input: VecDeque<u8>,
     dtr: bool,
+    dropped: u64,
 }
 
 impl UsbCdc {
@@ -55,6 +64,7 @@ impl UsbCdc {
             decoder: SlipDecoder::default(),
             input: VecDeque::new(),
             dtr: control_dtr,
+            dropped: 0,
         };
         std::thread::sleep(settle);
         Ok(result)
@@ -93,7 +103,10 @@ impl Transport for UsbCdc {
         loop {
             while let Some(byte) = self.input.pop_front() {
                 if let Some(packet) = self.decoder.push(byte) {
-                    return Frame::decode(&packet).map(Some);
+                    match Frame::decode(&packet) {
+                        Ok(frame) => return Ok(Some(frame)),
+                        Err(_) => self.dropped += 1,
+                    }
                 }
             }
             let time = deadline.saturating_duration_since(Instant::now());
@@ -132,9 +145,53 @@ impl Transport for UsbCdc {
         self.input.clear();
         self.decoder = SlipDecoder::default();
     }
+
+    fn dropped_frames(&self) -> u64 {
+        self.dropped
+    }
 }
 impl Drop for UsbCdc {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::{LOG, slip_encode};
+
+    fn idle() -> UsbCdc {
+        UsbCdc {
+            port: None,
+            decoder: SlipDecoder::default(),
+            input: VecDeque::new(),
+            dtr: false,
+            dropped: 0,
+        }
+    }
+
+    #[test]
+    fn damaged_frames_are_dropped_and_counted() {
+        let frame = |seq: u8| Frame {
+            kind: LOG,
+            opcode: 0x210,
+            id: 0,
+            payload: vec![seq; 20],
+        };
+        let mut damaged = frame(1).encode().unwrap();
+        damaged[14] ^= 0xff;
+        let mut usb = idle();
+        usb.input.extend(slip_encode(&frame(0).encode().unwrap()));
+        usb.input.extend(slip_encode(&damaged));
+        // The front of a frame lost: the rest arrives without a valid header.
+        usb.input
+            .extend(slip_encode(&frame(2).encode().unwrap()[9..]));
+        usb.input.extend(slip_encode(&frame(3).encode().unwrap()));
+
+        assert_eq!(usb.receive(Duration::ZERO).unwrap(), Some(frame(0)));
+        assert_eq!(usb.receive(Duration::ZERO).unwrap(), Some(frame(3)));
+        assert_eq!(usb.receive(Duration::ZERO).unwrap(), None);
+        assert_eq!(usb.dropped_frames(), 2);
     }
 }
