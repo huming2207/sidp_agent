@@ -105,14 +105,20 @@ pub struct Envelope {
     pub max: f32,
     /// Highest range used.
     pub range: Range,
+    /// Lowest supply voltage, in volts.
+    pub supply_min: f32,
+    /// Highest supply voltage, in volts.
+    pub supply_max: f32,
 }
 
 impl Envelope {
-    fn of(current: f32, range: Range) -> Self {
+    fn of(current: f32, supply: f32, range: Range) -> Self {
         Self {
             min: current,
             max: current,
             range,
+            supply_min: supply,
+            supply_max: supply,
         }
     }
 
@@ -120,6 +126,8 @@ impl Envelope {
         self.min = self.min.min(other.min);
         self.max = self.max.max(other.max);
         self.range = self.range.max(other.range);
+        self.supply_min = self.supply_min.min(other.supply_min);
+        self.supply_max = self.supply_max.max(other.supply_max);
     }
 }
 
@@ -140,6 +148,12 @@ pub struct Stats {
     pub charge: f64,
     /// Energy drawn from the supply, in joules.
     pub energy: f64,
+    /// Mean supply voltage, in volts.
+    pub supply_average: f64,
+    /// Lowest supply voltage, in volts.
+    pub supply_min: f32,
+    /// Highest supply voltage, in volts.
+    pub supply_max: f32,
 }
 
 /// One measurement.
@@ -219,9 +233,10 @@ impl Recording {
     pub fn extend(&mut self, samples: &[Sample]) {
         for sample in samples {
             if self.len().is_multiple_of(BLOCK) {
-                self.blocks.push(Envelope::of(sample.current, sample.range));
+                self.blocks
+                    .push(Envelope::of(sample.current, sample.supply, sample.range));
             } else if let Some(block) = self.blocks.last_mut() {
-                block.merge(&Envelope::of(sample.current, sample.range));
+                block.merge(&Envelope::of(sample.current, sample.supply, sample.range));
             }
             self.current.push(sample.current);
             self.supply.push(sample.supply);
@@ -248,12 +263,19 @@ impl Recording {
         let mut energy = 0.0f64;
         let mut min = f32::INFINITY;
         let mut max = f32::NEG_INFINITY;
+        let mut supply_sum = 0.0f64;
+        let mut supply_min = f32::INFINITY;
+        let mut supply_max = f32::NEG_INFINITY;
         for index in range.clone() {
             let current = self.current[index];
+            let supply = self.supply[index];
             sum += f64::from(current);
-            energy += f64::from(current) * f64::from(self.supply[index]) * dt;
+            energy += f64::from(current) * f64::from(supply) * dt;
             min = min.min(current);
             max = max.max(current);
+            supply_sum += f64::from(supply);
+            supply_min = supply_min.min(supply);
+            supply_max = supply_max.max(supply);
         }
         let samples = range.len();
         Some(Stats {
@@ -264,6 +286,9 @@ impl Recording {
             max,
             charge: sum * dt,
             energy,
+            supply_average: supply_sum / samples as f64,
+            supply_min,
+            supply_max,
         })
     }
 
@@ -292,7 +317,7 @@ impl Recording {
     /// Envelope of samples `first..last`, using block summaries for the
     /// whole blocks inside.
     fn envelope_of(&self, first: usize, last: usize) -> Envelope {
-        let sample = |i: usize| Envelope::of(self.current[i], self.range[i]);
+        let sample = |i: usize| Envelope::of(self.current[i], self.supply[i], self.range[i]);
         let mut result = sample(first);
         let mut i = first;
         while i < last {
@@ -618,15 +643,18 @@ mod tests {
     fn statistics_integrate_charge_and_energy() {
         let mut recording = Recording::new(1000);
         recording.extend(&constant(2e-3, 3.0, 1000));
-        recording.extend(&constant(4e-3, 3.0, 1000));
+        recording.extend(&constant(4e-3, 3.2, 1000));
         assert_eq!(recording.duration(), 2.0);
 
         let all = recording.stats(0.0, 2.0).unwrap();
         assert_eq!(all.samples, 2000);
         assert!((all.average - 3e-3).abs() < 1e-9);
         assert!((all.charge - 6e-3).abs() < 1e-9, "{}", all.charge);
-        assert!((all.energy - 18e-3).abs() < 1e-8, "{}", all.energy);
+        // 2 mA x 3.0 V + 4 mA x 3.2 V, for 1 s each.
+        assert!((all.energy - 18.8e-3).abs() < 1e-8, "{}", all.energy);
         assert_eq!((all.min, all.max), (2e-3, 4e-3));
+        assert!((all.supply_average - 3.1).abs() < 1e-6);
+        assert_eq!((all.supply_min, all.supply_max), (3.0, 3.2));
 
         let second_half = recording.stats(1.5, 1.0).unwrap();
         assert_eq!(second_half.samples, 500);
@@ -666,9 +694,20 @@ mod tests {
                     .map(|s| s.current)
                     .fold(f32::NEG_INFINITY, f32::max);
                 let range = slice.iter().map(|s| s.range).max().unwrap();
+                let supply_min = slice.iter().map(|s| s.supply).fold(f32::INFINITY, f32::min);
+                let supply_max = slice
+                    .iter()
+                    .map(|s| s.supply)
+                    .fold(f32::NEG_INFINITY, f32::max);
                 assert_eq!(
                     *value,
-                    Some(Envelope { min, max, range }),
+                    Some(Envelope {
+                        min,
+                        max,
+                        range,
+                        supply_min,
+                        supply_max
+                    }),
                     "column {column}"
                 );
             }

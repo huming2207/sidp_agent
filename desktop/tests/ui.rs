@@ -514,7 +514,7 @@ async fn the_chart_zooms_pans_and_selects_like_the_power_profiler(cx: &mut TestA
     let dir = tempfile::tempdir().unwrap();
     // Short enough that the page scrolls, as in a normal window: the chart
     // must still get the wheel.
-    let (window, view) = open_sized(cx, &dir.path().join("state.json"), 900.);
+    let (window, view) = open_sized(cx, &dir.path().join("state.json"), 1100.);
     let power = cx.update(|cx| view.read(cx).power().clone());
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);

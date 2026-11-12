@@ -46,6 +46,9 @@ const SPANS: [Option<f64>; 6] = [
 /// Chart heights.
 const FULL_HEIGHT: f32 = 300.;
 const COMPACT_HEIGHT: f32 = 150.;
+/// Voltage chart heights.
+const VOLTAGE_HEIGHT: f32 = 120.;
+const VOLTAGE_COMPACT_HEIGHT: f32 = 70.;
 /// Width of the value labels left of the chart.
 const AXIS_WIDTH: f32 = 64.;
 /// The lowest and highest currents the chart shows.
@@ -660,6 +663,128 @@ impl PowerView {
             .into_any_element()
     }
 
+    /// VPP_INPUT over the same window as the current chart.
+    fn render_voltage_chart(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let height = if self.compact {
+            VOLTAGE_COMPACT_HEIGHT
+        } else {
+            VOLTAGE_HEIGHT
+        };
+        let (from, to) = self.visible();
+        let columns = (f32::from(self.chart.get().size.width) as usize).clamp(100, 4000);
+        let plot = if self.recording.indices(from, to).len() <= columns {
+            let rate = f64::from(self.recording.rate());
+            let range = self.recording.indices(from, to);
+            let start = range.start.saturating_sub(1);
+            let end = (range.end + 1).min(self.recording.len());
+            Plot::Line(
+                (start..end)
+                    .filter_map(|i| {
+                        let sample = self.recording.sample(i)?;
+                        Some(((i as f64 / rate - from) / (to - from), sample.supply))
+                    })
+                    .collect(),
+            )
+        } else {
+            // The same envelope, read for voltage instead of current.
+            Plot::Envelope(
+                self.recording
+                    .envelope(from, to, columns)
+                    .into_iter()
+                    .map(|column| {
+                        column.map(|e| power::Envelope {
+                            min: e.supply_min,
+                            max: e.supply_max,
+                            ..e
+                        })
+                    })
+                    .collect(),
+            )
+        };
+        let (low, high) = voltage_range(&plot);
+        let scale = Scale {
+            low,
+            high,
+            log: false,
+            volts: true,
+        };
+        let value_ticks = scale.ticks();
+        let tick_fractions: Vec<f32> = value_ticks.iter().map(|(f, _)| *f).collect();
+        let time_fractions: Vec<f32> = time_ticks(from, to).iter().map(|(f, _)| *f).collect();
+        let selection = self.selection.map(|(a, b)| {
+            (
+                ((a - from) / (to - from)) as f32,
+                ((b - from) / (to - from)) as f32,
+            )
+        });
+        let hover = self.hover.map(|t| ((t - from) / (to - from)) as f32);
+        let colors = ChartColors {
+            line: theme.chart_2,
+            grid: theme.border.opacity(0.6),
+            selection: theme.chart_1.opacity(0.15),
+            hover: theme.muted_foreground.opacity(0.6),
+        };
+        let painted = canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                paint_chart(
+                    bounds,
+                    window,
+                    &plot,
+                    &scale,
+                    &tick_fractions,
+                    &time_fractions,
+                    selection,
+                    hover,
+                    &colors,
+                )
+            },
+        )
+        .size_full();
+
+        let value_labels = div()
+            .relative()
+            .flex_none()
+            .w(px(AXIS_WIDTH))
+            .h(px(height))
+            .children(value_ticks.into_iter().map(|(fraction, label)| {
+                div()
+                    .absolute()
+                    .right(px(8.))
+                    .top(px((1.0 - fraction) * height - 7.0))
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(label)
+            }));
+        v_flex()
+            .w_full()
+            .gap_1()
+            .child(
+                div()
+                    .pl(px(AXIS_WIDTH))
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Supply (VPP_INPUT)"),
+            )
+            .child(
+                h_flex().w_full().items_start().child(value_labels).child(
+                    div()
+                        .id("power-voltage-chart")
+                        .flex_1()
+                        .min_w_0()
+                        .h(px(height))
+                        .rounded(theme.radius)
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.background)
+                        .overflow_hidden()
+                        .child(painted),
+                ),
+            )
+            .into_any_element()
+    }
+
     fn render_chart(&self, height: f32, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (from, to) = self.visible();
@@ -688,6 +813,7 @@ impl PowerView {
             low,
             high,
             log: self.log_scale,
+            volts: false,
         };
         let value_ticks = scale.ticks();
         let time_ticks = time_ticks(from, to);
@@ -729,9 +855,10 @@ impl PowerView {
         let hover_text = self.hover.and_then(|t| {
             let sample = self.recording.sample_at(t)?;
             Some(format!(
-                "{}  ·  {}  ·  {}",
+                "{}  ·  {}  ·  {:.3} V  ·  {}",
                 power::format_time(t),
                 power::format_current(f64::from(sample.current)),
+                sample.supply,
                 sample.range.label()
             ))
         });
@@ -974,7 +1101,13 @@ impl PowerView {
                         .child(row("Minimum", power::format_current(f64::from(stats.min))))
                         .child(row("Charge", power::format_charge(stats.charge)))
                         .child(row("Energy", power::format_energy(stats.energy)))
-                        .child(row("Duration", power::format_time(stats.duration)));
+                        .child(row("Duration", power::format_time(stats.duration)))
+                        .child(row(
+                            "Voltage average",
+                            format!("{:.3} V", stats.supply_average),
+                        ))
+                        .child(row("Voltage maximum", format!("{:.3} V", stats.supply_max)))
+                        .child(row("Voltage minimum", format!("{:.3} V", stats.supply_min)));
                 }
                 None => {
                     body = body.child(
@@ -1050,6 +1183,7 @@ impl Render for PowerView {
             FULL_HEIGHT
         };
         let chart = self.render_chart(height, cx);
+        let voltage = self.render_voltage_chart(cx);
         let controls = self.render_chart_controls(cx);
         let stats = (!self.compact).then(|| self.render_stats(cx));
         let legend = self.render_legend(cx);
@@ -1070,6 +1204,7 @@ impl Render for PowerView {
             })
             .child(readouts)
             .child(chart)
+            .child(voltage)
             .child(controls)
             .child(legend)
             .children(stats)
@@ -1084,12 +1219,14 @@ enum Plot {
     Envelope(Vec<Option<power::Envelope>>),
 }
 
-/// Maps currents to heights.
+/// Maps currents or voltages to heights.
 #[derive(Clone, Copy)]
 struct Scale {
     low: f64,
     high: f64,
     log: bool,
+    /// Values are volts, not amperes.
+    volts: bool,
 }
 
 impl Scale {
@@ -1115,11 +1252,24 @@ impl Scale {
             }
             ticks
         } else {
-            let step = nice_step(self.high / 4.0);
-            (0..)
+            let span = self.high - self.low;
+            let mut step = nice_step(span / 4.0);
+            if span / step < 3.0 {
+                // A narrow span, such as a supply voltage: finer gridlines.
+                step = nice_step(span / 8.0);
+            }
+            let first = (self.low / step - 1e-6).ceil() as i64;
+            (first..)
                 .map(|i| i as f64 * step)
-                .take_while(|v| *v <= self.high * 1.0001)
-                .map(|v| (self.fraction(v), tick_label(v)))
+                .take_while(|v| *v <= self.high + step * 1e-4)
+                .map(|v| {
+                    let label = if self.volts {
+                        volt_label(v, step)
+                    } else {
+                        tick_label(v)
+                    };
+                    (self.fraction(v), label)
+                })
                 .collect()
         }
     }
@@ -1177,6 +1327,46 @@ fn value_range(plot: &Plot, log: bool) -> (f64, f64) {
         let step = nice_step(high / 4.0);
         (0.0, (high / step).ceil() * step)
     }
+}
+
+/// Lowest and highest voltage shown for `plot`: the measured span with some
+/// room, at least 50 mV, so a sag stands out and noise does not.
+fn voltage_range(plot: &Plot) -> (f64, f64) {
+    let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
+    match plot {
+        Plot::Line(points) => {
+            for (_, value) in points {
+                min = min.min(f64::from(*value));
+                max = max.max(f64::from(*value));
+            }
+        }
+        Plot::Envelope(columns) => {
+            for envelope in columns.iter().flatten() {
+                min = min.min(f64::from(envelope.min));
+                max = max.max(f64::from(envelope.max));
+            }
+        }
+    }
+    if !min.is_finite() {
+        return (0.0, 4.0);
+    }
+    let middle = (min + max) / 2.0;
+    let half = ((max - min) * 0.6).max(0.025);
+    let step = nice_step(half / 2.0);
+    (
+        ((middle - half) / step).floor() * step,
+        ((middle + half) / step).ceil() * step,
+    )
+}
+
+/// A voltage gridline label with as many decimals as the step needs.
+fn volt_label(value: f64, step: f64) -> String {
+    let decimals = if step >= 1.0 {
+        0
+    } else {
+        (-step.log10()).ceil() as usize
+    };
+    format!("{value:.decimals$} V")
 }
 
 /// 1, 2 or 5 times a power of ten, at least `rough`.
@@ -1344,6 +1534,7 @@ mod tests {
             low,
             high,
             log: true,
+            volts: false,
         };
         let labels: Vec<String> = scale.ticks().into_iter().map(|(_, l)| l).collect();
         assert_eq!(labels, ["1 µA", "10 µA", "100 µA", "1 mA", "10 mA"]);
@@ -1360,9 +1551,32 @@ mod tests {
             low,
             high,
             log: false,
+            volts: false,
         };
         let labels: Vec<String> = scale.ticks().into_iter().map(|(_, l)| l).collect();
         assert_eq!(labels, ["0 A", "1 mA", "2 mA", "3 mA", "4 mA"]);
+    }
+
+    #[test]
+    fn voltage_scale_zooms_in_on_the_supply() {
+        // A 3.3 V supply sagging to 3.25 V: the axis frames the sag, not 0 V.
+        let plot = Plot::Line(vec![(0.0, 3.30), (0.5, 3.25), (1.0, 3.30)]);
+        let (low, high) = voltage_range(&plot);
+        assert!(low > 3.1 && low <= 3.25, "{low}");
+        assert!((3.30..3.4).contains(&high), "{high}");
+        let scale = Scale {
+            low,
+            high,
+            log: false,
+            volts: true,
+        };
+        let labels: Vec<String> = scale.ticks().into_iter().map(|(_, l)| l).collect();
+        assert!(labels.len() >= 3, "{labels:?}");
+        assert!(labels.iter().all(|l| l.ends_with(" V")), "{labels:?}");
+
+        // A flat supply still gets a readable span.
+        let (low, high) = voltage_range(&Plot::Line(vec![(0.0, 3.309), (1.0, 3.309)]));
+        assert!(high - low >= 0.05, "{low}..{high}");
     }
 
     #[test]
