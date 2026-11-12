@@ -1,5 +1,6 @@
 //! Request matching, asynchronous events and connection acceptance.
 use super::*;
+use prost::Message;
 
 impl<T: Transport> Session<T> {
     pub(super) fn wire_error<R>(&mut self, error: io::Error) -> Result<R> {
@@ -32,6 +33,25 @@ impl<T: Transport> Session<T> {
             }
             // Logs are discarded here; no unbounded log queue can block control.
             (codec::LOG, 0x31, 0) => Ok(()),
+            (codec::LOG, power::POWER_DATA, 0) => {
+                let data = match power::DataFrame::parse(&frame.payload) {
+                    Ok(data) => data,
+                    Err(e) => return self.wire_error(e),
+                };
+                if let Some(sink) = &mut self.power_sink {
+                    sink(power::Message::Data(data));
+                }
+                Ok(())
+            }
+            (codec::EVENT, power::POWER_STOPPED, 0) => {
+                let Ok(stopped) = power::Stopped::decode(frame.payload.as_slice()) else {
+                    return self.wire_error(invalid("malformed POWER_STOPPED"));
+                };
+                if let Some(sink) = &mut self.power_sink {
+                    sink(power::Message::Stopped(stopped));
+                }
+                Ok(())
+            }
             _ => self.wire_error(invalid("unexpected SIDP event")),
         }
     }

@@ -6,6 +6,7 @@
 //! prefetch is performed in this milestone.
 use crate::{
     codec::{self, Frame, Reader, invalid},
+    power,
     transport::Transport,
 };
 use std::{
@@ -42,10 +43,14 @@ mod control;
 mod exchange;
 mod management;
 mod memory;
+mod power_service;
 mod registers;
 mod types;
 use types::registers;
 pub use types::{Region, RegisterValues, ResetKind, Stop, TargetInfo};
+
+/// Receives power measurement data that arrives on a session.
+pub type PowerSink = Box<dyn FnMut(power::Message) + Send>;
 
 /// Single-core SIDP session with one outstanding request and no reconnect replay.
 pub struct Session<T: Transport> {
@@ -59,6 +64,7 @@ pub struct Session<T: Transport> {
     breakpoints: BTreeMap<u32, u32>, // address -> stable SIDP breakpoint id
     next_breakpoint: u32,
     requests: u64,
+    power_sink: Option<PowerSink>,
 }
 impl<T: Transport> Session<T> {
     /// Create an unattached session on a fresh physical connection.
@@ -74,7 +80,13 @@ impl<T: Transport> Session<T> {
             breakpoints: BTreeMap::new(),
             next_breakpoint: 1,
             requests: 0,
+            power_sink: None,
         }
+    }
+    /// Hands power data that arrives from now on to `sink`, while requests
+    /// and polls run as usual; `None` discards it.
+    pub fn set_power_sink(&mut self, sink: Option<PowerSink>) {
+        self.power_sink = sink;
     }
     /// Accepted target description, if attached.
     pub fn info(&self) -> Option<&TargetInfo> {

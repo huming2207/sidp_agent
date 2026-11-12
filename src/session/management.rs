@@ -14,7 +14,7 @@ use crate::manage::{
 use prost::Message;
 
 impl<T: Transport> Session<T> {
-    fn decode_response<M: Message + Default>(&mut self, bytes: &[u8]) -> Result<M> {
+    pub(super) fn decode_response<M: Message + Default>(&mut self, bytes: &[u8]) -> Result<M> {
         match M::decode(bytes) {
             Ok(message) => Ok(message),
             Err(_) => self.wire_error(invalid("malformed management response")),

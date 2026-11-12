@@ -1,10 +1,19 @@
 //! Session regressions using scripted complete-frame transport boundaries.
+use prost::Message as _;
 use sidp_agent::{
-    codec::{EVENT, Frame, RESPONSE},
+    codec::{EVENT, Frame, LOG, RESPONSE},
+    power,
     session::{CAP_HW_BP, CAP_STEP, ResetKind, Session},
     transport::Transport,
 };
-use std::{cell::RefCell, collections::VecDeque, io, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::VecDeque,
+    io,
+    rc::Rc,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 #[derive(Default)]
 struct Wire {
@@ -226,4 +235,70 @@ fn target_running_response_discards_old_stop_cache() {
     wire.borrow_mut().incoming.push_back(stopped(2, false));
     session.poll(Duration::from_millis(1)).unwrap();
     assert_eq!(session.stop().unwrap().id, 2);
+}
+fn power_data(seq: u32) -> Frame {
+    let mut payload = seq.to_le_bytes().to_vec();
+    payload.extend(1000u64.to_le_bytes());
+    payload.extend([1, 0, 0, 0]);
+    payload.extend([2, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    payload.extend([20, 0, 0x40, 0x0a]);
+    Frame {
+        kind: LOG,
+        opcode: power::POWER_DATA,
+        id: 0,
+        payload,
+    }
+}
+#[test]
+fn power_frames_reach_the_sink_during_requests() {
+    let (mut session, wire) = setup(15);
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let sink = received.clone();
+    session.set_power_sink(Some(Box::new(move |message| {
+        sink.lock().unwrap().push(message);
+    })));
+
+    let stopped = power::Stopped {
+        reason: power::StopReason::StopNoSupply as i32,
+        samples: 1,
+        dropped_frames: 0,
+    };
+    let stop = power::StopResponse {
+        samples: 1,
+        dropped_frames: 0,
+    };
+    wire.borrow_mut().incoming.extend([
+        power_data(0),
+        Frame {
+            kind: EVENT,
+            opcode: power::POWER_STOPPED,
+            id: 0,
+            payload: stopped.encode_to_vec(),
+        },
+        response(power::POWER_STOP, 2, &stop.encode_to_vec()),
+    ]);
+    assert_eq!(session.power_stop().unwrap(), stop);
+    assert!(!session.is_closed());
+
+    let received = received.lock().unwrap();
+    assert_eq!(received.len(), 2);
+    let power::Message::Data(frame) = &received[0] else {
+        panic!("expected data first");
+    };
+    assert_eq!(frame.runs[0].range, power::Range::High);
+    assert_eq!(frame.runs[0].samples[0].shunt, 20);
+    assert_eq!(received[1], power::Message::Stopped(stopped));
+}
+#[test]
+fn power_frames_without_a_sink_are_discarded() {
+    let (mut session, wire) = setup(15);
+    wire.borrow_mut().incoming.push_back(power_data(0));
+    session.poll(Duration::from_millis(1)).unwrap();
+    assert!(!session.is_closed());
+
+    let mut malformed = power_data(1);
+    malformed.payload.pop();
+    wire.borrow_mut().incoming.push_back(malformed);
+    assert!(session.poll(Duration::from_millis(1)).is_err());
+    assert!(session.is_closed());
 }

@@ -1,8 +1,7 @@
 //! Soul Injector management service: device info, asset upload, jobs and
 //! the production log.
 //!
-//! These are SIDP opcodes 0x0100 and up, documented in sidp_client's
-//! `docs/sidp-management.md`. Payloads are the protobuf messages in
+//! These are SIDP opcodes 0x0100 and up. Payloads are the protobuf messages in
 //! `proto/manage.proto` (a copy of sidp_client's; keep them identical),
 //! except ASSET_WRITE, which is a 4-byte offset followed by raw data.
 use crate::codec;
