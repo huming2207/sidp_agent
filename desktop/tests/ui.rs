@@ -572,7 +572,11 @@ async fn the_chart_zooms_pans_and_selects_like_the_power_profiler(cx: &mut TestA
 
     // Dragging to the right moves back in time and stops following.
     cx.update_window(window, |_, window, cx| {
+        // The window buttons are below the charts: scroll down to them, then back.
+        window.scroll("power-start", ScrollDelta::Lines(point(0., -10.)), cx);
+        window.render_frame(cx);
         window.within("power-span").click(3usize, cx); // 10 s
+        window.scroll("power-export", ScrollDelta::Lines(point(0., 10.)), cx);
         window.render_frame(cx);
         let chart = window.find("power-chart").bounds();
         let start = chart.center();

@@ -61,11 +61,8 @@ impl AppView {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .max_w(px(if self.state.mode == Mode::Power {
-                        1100.
-                    } else {
-                        860.
-                    }))
+                    // The power charts use whatever width the window gives them.
+                    .when(self.state.mode != Mode::Power, |this| this.max_w(px(860.)))
                     .gap_5()
                     .children(sections),
             )

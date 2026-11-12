@@ -43,11 +43,12 @@ const SPANS: [Option<f64>; 6] = [
     Some(60.0),
     None,
 ];
-/// Chart heights.
+/// Chart heights. The full layout grows with the window, between these.
 const FULL_HEIGHT: f32 = 300.;
+const FULL_MAX_HEIGHT: f32 = 900.;
 const COMPACT_HEIGHT: f32 = 150.;
-/// Voltage chart heights.
-const VOLTAGE_HEIGHT: f32 = 120.;
+/// Voltage chart heights, as a share of the current chart's in the full layout.
+const VOLTAGE_SHARE: f32 = 0.4;
 const VOLTAGE_COMPACT_HEIGHT: f32 = 70.;
 /// Width of the value labels left of the chart.
 const AXIS_WIDTH: f32 = 64.;
@@ -664,13 +665,8 @@ impl PowerView {
     }
 
     /// VPP_INPUT over the same window as the current chart.
-    fn render_voltage_chart(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_voltage_chart(&self, height: f32, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let height = if self.compact {
-            VOLTAGE_COMPACT_HEIGHT
-        } else {
-            VOLTAGE_HEIGHT
-        };
         let (from, to) = self.visible();
         let columns = (f32::from(self.chart.get().size.width) as usize).clamp(100, 4000);
         let plot = if self.recording.indices(from, to).len() <= columns {
@@ -1174,16 +1170,19 @@ impl PowerView {
 }
 
 impl Render for PowerView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let toolbar = self.render_toolbar(cx);
         let readouts = self.render_readouts(cx);
-        let height = if self.compact {
-            COMPACT_HEIGHT
+        // Full size, the current chart takes about 45% of the window's height.
+        let (height, voltage_height) = if self.compact {
+            (COMPACT_HEIGHT, VOLTAGE_COMPACT_HEIGHT)
         } else {
-            FULL_HEIGHT
+            let height = (f32::from(window.viewport_size().height) * 0.45)
+                .clamp(FULL_HEIGHT, FULL_MAX_HEIGHT);
+            (height, height * VOLTAGE_SHARE)
         };
         let chart = self.render_chart(height, cx);
-        let voltage = self.render_voltage_chart(cx);
+        let voltage = self.render_voltage_chart(voltage_height, cx);
         let controls = self.render_chart_controls(cx);
         let stats = (!self.compact).then(|| self.render_stats(cx));
         let legend = self.render_legend(cx);
