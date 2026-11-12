@@ -74,15 +74,21 @@ supply, and power the target from VPP output (pin 9).
 
 - Choose the sample rate and how long to record, then *Start*. The rates are
   the Soul Injector's: 227 and 909 samples per second, and 1.7 kS/s, the
-  fastest it reads, which can miss the odd conversion.
+  fastest it reads. Frames damaged on the USB link are dropped and show as
+  gaps (see the open items in Soul Injector's `docs/en/rev8-hardware.md`).
 - The chart shows current on a log or linear scale. As in the Power
   Profiler, the mouse wheel zooms time around the pointer, dragging pans
   (and stops following new samples; *Back to newest* resumes), and sideways
   scrolling pans too. The buttons jump to windows from 10 ms to the whole
   recording. The strip under the chart shows which current range (LOW, MID,
-  HIGH) each part was measured in.
+  HIGH) each part was measured in. The charts fill the window: the current
+  chart takes 45% of its height.
+- A second chart shows the supply (`VPP_INPUT`) over the same window, on a
+  linear scale fitted to the measured voltages (at least 50 mV tall) so a sag
+  stands out. Hovering shows time, current, voltage and range.
 - Shift-drag across the chart to select part of it. *Window* and *Selection*
-  show average, maximum and minimum current, charge, energy and duration.
+  show average, maximum and minimum current, charge, energy, duration, and
+  average, maximum and minimum voltage.
 - *Export CSV* saves the selection, or everything, as
   `time_s,current_a,supply_v,range`.
 

@@ -120,6 +120,12 @@ input bias, to subtract later. The power service is described in
 `sidp_client/docs/sidp-power.md`. Power data shares the debug connection, so
 one program owns both: the CLI records power only while it is not serving GDB.
 
+A frame that fails its CRC, size or version check is dropped rather than
+closing the connection, as SIDP requires; a lost response then ends in its
+request's timeout, and lost power data shows as a gap. `power record` reports
+how many were dropped ("damaged on the wire"). Rev 8 sends roughly one damaged
+frame per 1400 at 588 µs; the device-side cause is not found yet.
+
 ## CLI and GDB
 
 ```sh
