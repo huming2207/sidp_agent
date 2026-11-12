@@ -1,11 +1,12 @@
 //! Command-line USB SIDP to local GDB bridge and Soul Injector job manager.
 //! See `sidp-agent --help`.
 mod commands;
+mod power_commands;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use commands::{Connection, DeviceSession, JobSource};
 use sidp_agent::{
-    manage,
+    manage, power,
     session::{self, ResetKind},
 };
 use std::{
@@ -83,6 +84,69 @@ enum Command {
     Log {
         #[command(subcommand)]
         command: LogCommand,
+    },
+    /// Measure the target's current and supply voltage.
+    Power {
+        #[command(subcommand)]
+        command: PowerCommand,
+    },
+}
+
+/// A current range of the power profiler.
+#[derive(Clone, Copy, ValueEnum)]
+enum RangeArg {
+    Low,
+    Mid,
+    High,
+}
+
+impl From<RangeArg> for power::Range {
+    fn from(range: RangeArg) -> Self {
+        match range {
+            RangeArg::Low => power::Range::Low,
+            RangeArg::Mid => power::Range::Mid,
+            RangeArg::High => power::Range::High,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum PowerCommand {
+    /// Show the profiler's ranges and accepted sample settings.
+    Info {
+        #[command(flatten)]
+        connection: Connection,
+    },
+    /// Record current and voltage to a CSV file.
+    Record {
+        #[command(flatten)]
+        connection: Connection,
+        /// CSV file to write: time_s,current_a,vin_v,vout_v,range,settling,gap.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// How long to record, in seconds.
+        #[arg(long, default_value_t = 10.0)]
+        seconds: f64,
+        /// INA226 conversion time in microseconds; see `power info`.
+        #[arg(long, default_value_t = 1100)]
+        conversion_us: u32,
+        /// Conversions averaged into each sample.
+        #[arg(long, default_value_t = 1)]
+        averages: u32,
+        /// Never step below this range.
+        #[arg(long, value_enum, default_value_t = RangeArg::Low)]
+        lowest_range: RangeArg,
+        /// Zero correction written by `power zero`.
+        #[arg(long)]
+        zero: Option<PathBuf>,
+    },
+    /// Measure the zero correction with nothing connected to VPP_OUTPUT.
+    Zero {
+        #[command(flatten)]
+        connection: Connection,
+        /// JSON file to write, for `power record --zero`.
+        #[arg(short, long)]
+        output: PathBuf,
     },
 }
 
@@ -213,6 +277,31 @@ fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                     no_ack,
                 },
         } => commands::log_pull(&connection, &output, no_ack),
+        Command::Power { command } => run_power_command(command),
+    }
+}
+
+fn run_power_command(command: PowerCommand) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        PowerCommand::Info { connection } => power_commands::info(&connection),
+        PowerCommand::Record {
+            connection,
+            output,
+            seconds,
+            conversion_us,
+            averages,
+            lowest_range,
+            zero,
+        } => {
+            let request = power::StartRequest {
+                conversion_us,
+                averages,
+                lowest_range: power::Range::from(lowest_range) as i32,
+                duration_ms: 0,
+            };
+            power_commands::record(&connection, request, seconds, &output, zero.as_deref())
+        }
+        PowerCommand::Zero { connection, output } => power_commands::zero(&connection, &output),
     }
 }
 

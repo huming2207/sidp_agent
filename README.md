@@ -14,7 +14,8 @@ cargo doc --no-deps --open
 ```
 
 The authoritative wire contract is Soul Injector's
-`components/sidp_client/include/sidp_defs.hpp` and `docs/sidp-protocol.md`.
+`components/sidp_client/include/sidp_defs.hpp` and the schemas in
+`components/sidp_client/proto`.
 This implementation uses explicit little-endian fields, a maximum 8192-byte
 frame, CRC-32/ISO-HDLC, and bounded SLIP decoding. No native structure layout
 or unsafe casting is used.
@@ -89,7 +90,35 @@ until the log is pulled.
 
 `proto/*.proto` and `proto/*.options` are copies of Soul Injector's
 `sidp_client/proto`; CI checks they stay identical. The management opcodes are
-documented in `sidp_client/docs/sidp-management.md`.
+described in `proto/manage.proto`.
+
+## Power measurement
+
+Boards with the power profiler (Rev 8) measure the target's current and
+`VPP_INPUT` while it runs, programs or is debugged:
+
+```sh
+cargo run -- power info --port /dev/ttyACM0
+cargo run -- power zero --port /dev/ttyACM0 --output zero.json   # nothing on VPP_OUTPUT
+cargo run -- power record --port /dev/ttyACM0 --seconds 10 --output power.csv \
+    [--zero zero.json] [--conversion-us 1100] [--averages 1] [--lowest-range low]
+```
+
+`record` writes `time_s,current_a,vin_v,vout_v,range,settling,gap` and prints
+the average, minimum and maximum. The sample period is the conversion time
+times the averages; `power info` lists the accepted values and the shortest
+period. `vout_v` is computed from `vin_v` and the range's series resistance,
+because the Rev 8 sensors only measure `VPP_INPUT`. `gap` marks samples after
+time that was not measured (a range change, a missed conversion or a dropped
+frame); `settling` marks samples just after a step down, which include output
+capacitor recharge.
+
+The device sends raw INA226 readings (`power` module); conversion and the zero
+correction happen here. `power zero` holds each range with nothing connected to
+`VPP_OUTPUT` and stores the open-output current per volt, mostly the INA226
+input bias, to subtract later. The power service is described in
+`sidp_client/docs/sidp-power.md`. Power data shares the debug connection, so
+one program owns both: the CLI records power only while it is not serving GDB.
 
 ## CLI and GDB
 
