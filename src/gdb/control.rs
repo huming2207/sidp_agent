@@ -75,8 +75,24 @@ impl<T: Transport> MonitorCmd for Adapter<T> {
         let kind = match cmd {
             b"reset" | b"reset system" => ResetKind::System,
             b"reset nrst" => ResetKind::Nrst,
+            b"flash-cache" | b"flash-cache on" | b"flash-cache off" => {
+                if cmd != b"flash-cache" {
+                    self.session.set_flash_cache(cmd == b"flash-cache on");
+                }
+                let state = if self.session.flash_cache() {
+                    "on"
+                } else {
+                    "off"
+                };
+                outputln!(
+                    out,
+                    "Flash cache {state}: flash reads are cached until the target runs again."
+                );
+                return Ok(());
+            }
             _ => {
                 outputln!(out, "usage: monitor reset [system|nrst]");
+                outputln!(out, "       monitor flash-cache [on|off]");
                 return Ok(());
             }
         };

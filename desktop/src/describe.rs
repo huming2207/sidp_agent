@@ -70,6 +70,9 @@ pub fn status(code: i32) -> String {
         23 => "All hardware watchpoints are in use.",
         24 => "The address is not aligned.",
         25 => "The connected target does not match the job.",
+        sidp_agent::manage::STATUS_UNAUTHORIZED => {
+            "The Soul Injector refused the password: it was mistyped, or the device's password was changed (set it again over USB with WiFi setup…)."
+        }
         sidp_agent::manage::STATUS_LOG_FULL => {
             "The production log on the Soul Injector is full. Pull the log, then try again."
         }

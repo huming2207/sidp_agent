@@ -1,5 +1,6 @@
 //! Finds Soul Injectors among the computer's USB serial ports.
 use serialport::{SerialPortInfo, SerialPortType, UsbPortInfo};
+use sidp_agent::listener::Listener;
 
 /// USB product string of the Soul Injector firmware.
 pub const PRODUCT: &str = "Soul Injector";
@@ -21,6 +22,32 @@ pub struct Port {
 pub fn list() -> Result<Vec<Port>, String> {
     let ports = serialport::available_ports().map_err(|e| e.to_string())?;
     Ok(from_infos(ports))
+}
+
+/// Soul Injectors connected to the app's listener over WiFi, as ports to
+/// open through it.
+pub fn network(listener: &Listener) -> Vec<Port> {
+    let port = listener.local_addr().port();
+    listener
+        .devices()
+        .into_iter()
+        .map(|device| Port {
+            path: format!("ws://127.0.0.1:{port}/{}", device.id),
+            product: format!("{PRODUCT} on WiFi"),
+            serial: Some(device.id),
+            soul_injector: true,
+        })
+        .collect()
+}
+
+/// Whether the port is a device on WiFi.
+pub fn is_network(path: &str) -> bool {
+    path.starts_with("ws://")
+}
+
+/// The device ID of a device on WiFi.
+pub fn device_id(path: &str) -> Option<&str> {
+    path.strip_prefix("ws://")?.rsplit('/').next()
 }
 
 fn from_infos(infos: Vec<SerialPortInfo>) -> Vec<Port> {
@@ -105,5 +132,14 @@ mod tests {
         ]);
         assert_eq!(ports.len(), 1);
         assert_eq!(ports[0].path, "/dev/cu.usbmodem1101");
+    }
+
+    #[test]
+    fn device_ids_come_from_wifi_ports_only() {
+        assert_eq!(
+            device_id("ws://127.0.0.1:80/7CDFA1B2C3D4"),
+            Some("7CDFA1B2C3D4")
+        );
+        assert_eq!(device_id("/dev/ttyACM0"), None);
     }
 }

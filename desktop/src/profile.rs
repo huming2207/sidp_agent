@@ -151,6 +151,8 @@ pub struct Settings {
     pub dark: Option<bool>,
     /// Power profiler zero correction, by device serial number.
     pub power_zero: BTreeMap<String, sidp_agent::power::Zero>,
+    /// Port Soul Injectors connect to over WiFi; used from the next start.
+    pub listen_port: u16,
 }
 
 impl Default for Settings {
@@ -163,6 +165,7 @@ impl Default for Settings {
             log_file: None,
             dark: None,
             power_zero: BTreeMap::new(),
+            listen_port: sidp_agent::transport::WEBSOCKET_PORT,
         }
     }
 }

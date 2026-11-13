@@ -4,15 +4,23 @@ This is one Rust package, a CLI and a reusable library. No UI, daemon framework,
 plugin registry, probe-rs fork or speculative prefetch engine is involved.
 
 - `codec`: explicit LE framing, CRC, bounded incremental SLIP.
-- `transport`: ordered complete-frame trait and USB CDC implementation. A future
-  WebSocket implementation will carry the same frames without SLIP and must
-  preserve timeout/close/no-replay semantics. No WebSocket implementation exists.
+- `transport`: ordered complete-frame trait, USB CDC and WebSocket. The
+  WebSocket implementation carries the same frames without SLIP, one per binary
+  message, and preserves timeout/close/no-replay semantics. It either accepts
+  a device directly or connects to a listener for a device ID.
+- `listener`: holds Soul Injectors that connect over WiFi, by device ID, for
+  `sidp-agent serve` and the desktop app. It forwards each local user's
+  WebSocket messages to the device unchanged and never logs in itself. One
+  reader thread per connection; writes are whole frames under the target
+  socket's lock, so forwarding adds no polling delay.
 - `session/types`: validated attach/stop/register payloads.
 - `session/exchange`: request IDs, matching responses, events, timeouts and attach.
 - `session/memory`, `registers`, `control`: target operations and cache discipline.
 - `gdb/architecture`, `mapping`: GDB register serialization and target XML.
 - `gdb/target`, `control`: RSP callbacks mapping onto the session.
 - `gdb/server`: bounded-I/O event loop; USB is serviced while GDB is idle or running.
+  While the target is halted it waits on GDB's socket and only checks the
+  device, so GDB's packets are not delayed; replies go out a packet at a time.
 
 ## Ownership and errors
 
@@ -36,11 +44,14 @@ STALE_STOP close the connection; a later stop must never reuse the old cache.
 
 ## Cache and memory safety
 
-Register snapshots and stack data belong to exactly one `stop_id` in one Session.
-No cache survives reconnect; RUN discards the stop, writes discard its values.
-Only readable, cacheable, nonvolatile RAM can be served from the stack snapshot.
-No block cache or read-ahead is implemented yet. Ordinary reads are exact and
-split only at the advertised wire transfer limit. Each request must fit one
+Register snapshots, stack data and cached flash belong to exactly one `stop_id`
+in one Session. No cache survives reconnect; RUN discards the stop, writes
+discard its register and stack values. Only readable, cacheable, nonvolatile
+RAM can be served from the stack snapshot. The optional flash cache (off by
+default in the library; the CLI and desktop turn it on for WiFi) reads the
+aligned 64-byte flash block around a read of 64 bytes or less, at most 256
+blocks per stop; it assumes nothing but the halted core writes flash. Other
+reads are exact and split only at the advertised wire transfer limit. Each request must fit one
 memory region. MMIO is rejected: guessing width from GDB's byte count would risk
 side effects. Flash writes require the separate Soul Injector programming flow.
 
@@ -58,5 +69,6 @@ actual target memory in this version.
 
 Validate physical CDC/DTR and SWD ownership with an integrated device. Then add
 latency measurement and bounded RAM read-ahead, with cache invalidation and
-user-command priority tests before tuning block size. WebSocket authentication,
-TLS, relay discovery and reconnect UX remain later work behind `Transport`.
+user-command priority tests before tuning block size. The network login is a
+SIDP request (`login`); TLS, relay discovery and reconnect UX remain later work
+behind `Transport`.

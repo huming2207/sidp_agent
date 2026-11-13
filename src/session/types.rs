@@ -137,6 +137,10 @@ pub struct Stop {
     pub stack_address: u64,
     /// Stack snapshot bytes, usable only for cacheable, nonvolatile RAM.
     pub stack: Vec<u8>,
+    /// Flash blocks read during this stop, by start address, when the flash
+    /// cache is on. The halted core cannot change flash, and the stop ends
+    /// when it runs again.
+    pub(super) flash: Vec<(u64, Vec<u8>)>,
 }
 impl Stop {
     pub(super) fn parse(bytes: &[u8]) -> io::Result<Self> {
@@ -167,6 +171,7 @@ impl Stop {
             registers,
             stack_address,
             stack,
+            flash: Vec::new(),
         })
     }
 }

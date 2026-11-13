@@ -1,8 +1,9 @@
 //! Device operations, run one at a time on a background thread.
 //!
 //! The UI starts an [`Operation`] with [`Worker::start`] and receives
-//! [`Event`]s while it runs. Every operation opens its own USB connection
-//! and closes it when done, like one command-line invocation. Nothing is
+//! [`Event`]s while it runs. Every operation opens its own connection, over
+//! USB or through the app's listener over WiFi, and closes it when done, like
+//! one command-line invocation. Nothing is
 //! retried on the same connection: a failed request ends the operation.
 use crate::{
     describe,
@@ -13,12 +14,12 @@ use futures::channel::mpsc::UnboundedSender;
 use sidp_agent::{
     manage::{
         self,
-        proto::{DeviceInfo, JobStatus, RunResult, Trigger},
+        proto::{DeviceInfo, JobStatus, NetConfig, NetStatus, RunResult, Trigger},
     },
     ntp,
     power::Zero,
     session::{self, ResetKind, Session},
-    transport::UsbCdc,
+    transport::{Transport, UsbCdc, WebSocket},
 };
 use std::{
     fs::OpenOptions,
@@ -36,8 +37,8 @@ use std::{
 mod bridge;
 mod power;
 
-/// An open USB connection to a Soul Injector.
-pub type DeviceSession = Session<UsbCdc>;
+/// An open connection to a Soul Injector, over USB or WiFi.
+pub type DeviceSession = Session<Box<dyn Transport + Send>>;
 
 /// How often a programming run is polled.
 const RUN_POLL: Duration = Duration::from_millis(500);
@@ -49,8 +50,11 @@ const BAUD: u32 = 115_200;
 /// How to reach the device.
 #[derive(Clone, Debug)]
 pub struct Connection {
-    /// Serial port path.
+    /// Serial port path, or `ws://127.0.0.1:PORT/DEVICE_ID` for a device
+    /// connected to the app's listener.
     pub port: String,
+    /// Device password, for a device on WiFi.
+    pub password: Option<String>,
     /// Per-request timeout.
     pub timeout: Duration,
     /// Wait after opening before the first request.
@@ -63,10 +67,27 @@ pub struct Connection {
 }
 
 impl Connection {
-    fn open(&self) -> Result<DeviceSession, Stop> {
-        UsbCdc::open(&self.port, BAUD, self.settle, self.dtr)
-            .map(|usb| Session::new(usb, self.timeout))
-            .map_err(|e| Stop::Failed(describe::open_error(&self.port, &e)))
+    fn open(&self, r: &Reporter) -> Result<DeviceSession, Stop> {
+        let Some((host, id)) = self
+            .port
+            .strip_prefix("ws://")
+            .and_then(|rest| rest.split_once('/'))
+        else {
+            let usb = UsbCdc::open(&self.port, BAUD, self.settle, self.dtr)
+                .map_err(|e| Stop::Failed(describe::open_error(&self.port, &e)))?;
+            return Ok(Session::new(Box::new(usb), self.timeout));
+        };
+        let ws = WebSocket::connect(host, id).map_err(|e| Stop::Failed(e.to_string()))?;
+        let mut session: DeviceSession = Session::new(Box::new(ws), self.timeout);
+        // Every request crosses WiFi, so cache flash reads within a stop.
+        session.set_flash_cache(true);
+        if let Err(error) = session.login(self.password.as_deref().unwrap_or_default()) {
+            if describe::status_code(&error) == Some(manage::STATUS_UNAUTHORIZED) {
+                r.send(Event::LoginRefused);
+            }
+            return Err(error.into());
+        }
+        Ok(session)
     }
 }
 
@@ -117,6 +138,10 @@ pub enum Operation {
     Power(DeviceFeed),
     /// Measure the power profiler's zero offset; nothing may be on VPP_OUTPUT.
     PowerZero,
+    /// Read the network settings and connection state.
+    ReadNetwork,
+    /// Store network settings; the device uses them after a restart.
+    SetNetwork(NetConfig),
 }
 
 /// Importance of a log line.
@@ -141,6 +166,15 @@ pub struct DeviceSnapshot {
     pub info: DeviceInfo,
     /// Job, trigger and last result.
     pub job: JobStatus,
+}
+
+/// Network settings and connection state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NetworkSnapshot {
+    /// Stored settings; the WiFi password is never returned.
+    pub config: NetConfig,
+    /// WiFi and server connection.
+    pub status: NetStatus,
 }
 
 /// State of the GDB server.
@@ -185,6 +219,10 @@ pub enum Event {
         /// The correction.
         zero: Zero,
     },
+    /// Fresh network settings and state.
+    Network(NetworkSnapshot),
+    /// The device refused the password.
+    LoginRefused,
     /// The operation ended; no events follow.
     Finished(Outcome),
 }
@@ -366,7 +404,26 @@ fn run(connection: &Connection, operation: Operation, r: &Reporter) -> Step<Stri
                 "Zero offset at 3.3 V: LOW {low:.2} µA, MID {mid:.2} µA, HIGH {high:.1} µA"
             ))
         }
+        Operation::ReadNetwork => {
+            let mut session = open(connection, r)?;
+            read_network(&mut session, r)?;
+            Ok(String::new())
+        }
+        Operation::SetNetwork(config) => {
+            let mut session = open(connection, r)?;
+            r.step("Storing network settings");
+            session.net_config_set(&config)?;
+            read_network(&mut session, r)?;
+            Ok("Network settings stored. Restart the Soul Injector to use them.".into())
+        }
     }
+}
+
+fn read_network(session: &mut DeviceSession, r: &Reporter) -> Step<()> {
+    let config = session.net_config_get()?;
+    let status = session.net_status()?;
+    r.send(Event::Network(NetworkSnapshot { config, status }));
+    Ok(())
 }
 
 /// Tells the view its recording ended; a second end is ignored there.
@@ -409,7 +466,7 @@ fn trigger(auto: bool) -> Trigger {
 fn open(connection: &Connection, r: &Reporter) -> Step<DeviceSession> {
     r.check()?;
     r.step(format!("Connecting to {}", connection.port));
-    connection.open()
+    connection.open(r)
 }
 
 fn snapshot(session: &mut DeviceSession, connection: &Connection, r: &Reporter) -> Step<()> {
@@ -722,7 +779,7 @@ fn attach(mut session: DeviceSession, plan: &DebugPlan, r: &Reporter) -> Step<De
 /// the cancellation checks; a failure only costs the resume.
 fn resume_after_stop(connection: &Connection, r: &Reporter) {
     r.step("Letting the target run");
-    let resumed = connection.open().and_then(|mut session| {
+    let resumed = connection.open(r).and_then(|mut session| {
         session.attach()?;
         session.detach(true)?;
         Ok(())

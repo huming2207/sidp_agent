@@ -6,6 +6,8 @@ pub mod codec;
 pub mod compile;
 pub mod gdb;
 pub mod job;
+pub mod listener;
+pub mod login;
 pub mod manage;
 pub mod ntp;
 pub mod power;

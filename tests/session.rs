@@ -302,3 +302,103 @@ fn power_frames_without_a_sink_are_discarded() {
     assert!(session.poll(Duration::from_millis(1)).is_err());
     assert!(session.is_closed());
 }
+
+/// Attach with RAM and a flash region at `flash_start`, `flash_len` bytes.
+fn setup_with_flash(flash_start: u64, flash_len: u64) -> (Session<Script>, Rc<RefCell<Wire>>) {
+    let mut info = vec![1, 3, 32, 0];
+    info.extend((CAP_HW_BP | CAP_STEP | 1).to_le_bytes());
+    info.extend([0; 12]);
+    info.extend(2u16.to_le_bytes());
+    info.extend(0u16.to_le_bytes());
+    info.extend(2u16.to_le_bytes());
+    info.extend(64u16.to_le_bytes());
+    info.extend(0x20000000u64.to_le_bytes());
+    info.extend(0x1000u64.to_le_bytes());
+    info.extend([1, 15, 0, 0]);
+    info.extend(flash_start.to_le_bytes());
+    info.extend(flash_len.to_le_bytes());
+    info.extend([2, 5, 0, 0]); // flash: read, execute
+    let wire = Rc::new(RefCell::new(Wire::default()));
+    wire.borrow_mut()
+        .incoming
+        .extend([response(1, 1, &info), stopped(1, false)]);
+    let mut session = Session::new(Script(wire.clone()), Duration::from_millis(20));
+    session.attach().unwrap();
+    (session, wire)
+}
+
+/// Queues the answer to memory read `id`: byte i of the target is `i as u8`.
+fn answer_read(wire: &Rc<RefCell<Wire>>, id: u32, address: u64, len: u32) {
+    let mut body = address.to_le_bytes().to_vec();
+    body.extend(len.to_le_bytes());
+    body.extend((0..len).map(|i| (address as u32 + i) as u8));
+    wire.borrow_mut()
+        .incoming
+        .push_back(response(0x10, id, &body));
+}
+
+/// Address and length of the last memory read sent.
+fn last_read(wire: &Rc<RefCell<Wire>>) -> (u64, u32) {
+    let sent = wire.borrow().sent.last().unwrap().payload.clone();
+    (
+        u64::from_le_bytes(sent[4..12].try_into().unwrap()),
+        u32::from_le_bytes(sent[12..16].try_into().unwrap()),
+    )
+}
+
+#[test]
+fn flash_reads_are_cached_until_the_target_runs() {
+    let (mut session, wire) = setup_with_flash(0x0800_0000, 0x4_0000);
+    session.set_flash_cache(true);
+    answer_read(&wire, 2, 0x0800_0000, 64);
+    let mut word = [0; 4];
+    session.read_memory(0x0800_0004, &mut word).unwrap();
+    assert_eq!(word, [4, 5, 6, 7]);
+    assert_eq!(last_read(&wire), (0x0800_0000, 64));
+    // GDB's repeated small reads around the PC: no more requests.
+    let mut half = [0; 2];
+    for address in [0x0800_0000, 0x0800_0002, 0x0800_0004] {
+        session.read_memory(address, &mut half).unwrap();
+        assert_eq!(half, [address as u8, address as u8 + 1]);
+    }
+    assert_eq!(session.request_count(), 2); // attach and one block
+    // Spanning two blocks reads only the missing one.
+    answer_read(&wire, 3, 0x0800_0040, 64);
+    session.read_memory(0x0800_003e, &mut word).unwrap();
+    assert_eq!(word, [0x3e, 0x3f, 0x40, 0x41]);
+    assert_eq!(last_read(&wire), (0x0800_0040, 64));
+    assert_eq!(session.request_count(), 3);
+
+    // Running ends the stop, and the cache with it.
+    wire.borrow_mut().incoming.push_back(response(0x20, 4, &[]));
+    session.run(true).unwrap();
+    wire.borrow_mut().incoming.push_back(stopped(2, false));
+    session.poll(Duration::from_millis(1)).unwrap();
+    answer_read(&wire, 5, 0x0800_0000, 64);
+    session.read_memory(0x0800_0004, &mut word).unwrap();
+    assert_eq!(session.request_count(), 5); // run, then the block again
+}
+
+#[test]
+fn flash_cache_blocks_stay_inside_the_region() {
+    let (mut session, wire) = setup_with_flash(0x0800_0010, 0x20);
+    session.set_flash_cache(true);
+    answer_read(&wire, 2, 0x0800_0010, 0x20);
+    let mut word = [0; 4];
+    session.read_memory(0x0800_0014, &mut word).unwrap();
+    assert_eq!(word, [0x14, 0x15, 0x16, 0x17]);
+    assert_eq!(last_read(&wire), (0x0800_0010, 0x20));
+}
+
+#[test]
+fn flash_reads_are_exact_with_the_cache_off() {
+    let (mut session, wire) = setup_with_flash(0x0800_0000, 0x4_0000);
+    assert!(!session.flash_cache());
+    let mut word = [0; 4];
+    for id in [2, 3] {
+        answer_read(&wire, id, 0x0800_0004, 4);
+        session.read_memory(0x0800_0004, &mut word).unwrap();
+        assert_eq!(last_read(&wire), (0x0800_0004, 4));
+    }
+    assert_eq!(session.request_count(), 3); // attach and both reads
+}

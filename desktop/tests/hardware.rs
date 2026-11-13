@@ -21,6 +21,7 @@ fn connection() -> Connection {
         settle: Duration::from_millis(250),
         ntp_server: String::new(),
         dtr: true,
+        password: None,
     }
 }
 

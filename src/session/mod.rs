@@ -67,6 +67,7 @@ pub struct Session<T: Transport> {
     next_breakpoint: u32,
     requests: u64,
     power_sink: Option<PowerSink>,
+    flash_cache: bool,
 }
 impl<T: Transport> Session<T> {
     /// Create an unattached session on a fresh physical connection.
@@ -83,6 +84,7 @@ impl<T: Transport> Session<T> {
             next_breakpoint: 1,
             requests: 0,
             power_sink: None,
+            flash_cache: false,
         }
     }
     /// Hands power data that arrives from now on to `sink`, while requests
@@ -117,6 +119,25 @@ impl<T: Transport> Session<T> {
         self.stop = None;
         self.breakpoints.clear();
         self.transport.close();
+    }
+    /// Serve small flash reads from blocks read earlier in the same stop.
+    ///
+    /// GDB reads the same few bytes around the PC dozens of times after each
+    /// stop. A halted core cannot change its flash, and every run, step or
+    /// reset ends the stop, so the cache never outlives the code that could
+    /// change flash. It can be wrong only if something else writes flash while
+    /// this core is halted: another core, or a flash operation the target
+    /// started just before halting on a part that does not stall reads during
+    /// it. Off by default.
+    pub fn set_flash_cache(&mut self, on: bool) {
+        self.flash_cache = on;
+        if let Some(stop) = &mut self.stop {
+            stop.flash.clear();
+        }
+    }
+    /// Whether small flash reads are cached within a stop.
+    pub fn flash_cache(&self) -> bool {
+        self.flash_cache
     }
     fn generation(&self) -> Result<u32> {
         self.stop

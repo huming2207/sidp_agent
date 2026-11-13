@@ -2,14 +2,18 @@
 //!
 //! These need no ATTACH and leave the debug state alone.
 use super::*;
+use crate::login::{
+    self,
+    messages::{Command0, Command1, Sec2Payload, SessionData},
+};
 use crate::manage::proto::{
     AssetBeginRequest, AssetBeginResponse, DeviceInfo, JobCancelRequest, JobRunOnceResponse,
-    JobSetRequest, JobStatus, LogAckRequest, LogReadRequest, LogReadResponse, SetTimeRequest,
-    Trigger,
+    JobSetRequest, JobStatus, LogAckRequest, LogReadRequest, LogReadResponse, NetConfig, NetStatus,
+    SetTimeRequest, Trigger,
 };
 use crate::manage::{
     ASSET_BEGIN, ASSET_COMMIT, ASSET_WRITE, DEVICE_INFO, JOB_CANCEL, JOB_GET, JOB_RUN_ONCE,
-    JOB_SET, LOG_ACK, LOG_READ, SET_TIME,
+    JOB_SET, LOG_ACK, LOG_READ, LOGIN, NET_CONFIG_GET, NET_CONFIG_SET, NET_STATUS, SET_TIME,
 };
 use prost::Message;
 
@@ -101,5 +105,74 @@ impl<T: Transport> Session<T> {
     pub fn log_ack(&mut self, up_to_id: u64) -> Result<()> {
         let request = LogAckRequest { up_to_id };
         self.empty_request(LOG_ACK, request.encode_to_vec())
+    }
+
+    /// Stored network settings; the WiFi password is never returned.
+    pub fn net_config_get(&mut self) -> Result<NetConfig> {
+        let payload = self.request(NET_CONFIG_GET, Vec::new())?;
+        self.decode_response(&payload)
+    }
+
+    /// Stores network settings for the device's next restart. USB only.
+    pub fn net_config_set(&mut self, config: &NetConfig) -> Result<()> {
+        self.empty_request(NET_CONFIG_SET, config.encode_to_vec())
+    }
+
+    /// WiFi and server connection state.
+    pub fn net_status(&mut self) -> Result<NetStatus> {
+        let payload = self.request(NET_STATUS, Vec::new())?;
+        self.decode_response(&payload)
+    }
+
+    /// Logs in with the device's password; needed before anything else over
+    /// the network. Fails with STATUS_UNAUTHORIZED for a wrong password, and
+    /// with a state error when the device cannot prove it knows the password.
+    pub fn login(&mut self, password: &str) -> Result<()> {
+        let client = login::Client::new(password)?;
+        let start = Sec2Payload {
+            msg: 0,
+            sc0: Some(Command0 {
+                client_username: login::USERNAME.as_bytes().to_vec(),
+                client_pubkey: client.public_key().to_vec(),
+            }),
+            ..Default::default()
+        };
+        let reply = self.login_step(start)?;
+        let Some(challenge) = reply.sr0.filter(|r| r.status == 0) else {
+            return self.wire_error(invalid("malformed login response"));
+        };
+        let Some((proof, device_proof)) =
+            client.proofs(&challenge.device_salt, &challenge.device_pubkey)
+        else {
+            return self.wire_error(invalid("invalid login challenge"));
+        };
+
+        let finish = Sec2Payload {
+            msg: 2,
+            sc1: Some(Command1 {
+                client_proof: proof,
+            }),
+            ..Default::default()
+        };
+        let reply = self.login_step(finish)?;
+        match reply.sr1 {
+            Some(answer) if answer.status == 0 && answer.device_proof == device_proof => Ok(()),
+            _ => Err(Error::State(
+                "the Soul Injector could not prove it knows the password; it may not be yours",
+            )),
+        }
+    }
+
+    fn login_step(&mut self, payload: Sec2Payload) -> Result<Sec2Payload> {
+        let request = SessionData {
+            sec_ver: 2,
+            sec2: Some(payload),
+        };
+        let reply = self.request(LOGIN, request.encode_to_vec())?;
+        let reply: SessionData = self.decode_response(&reply)?;
+        match reply.sec2 {
+            Some(payload) => Ok(payload),
+            None => self.wire_error(invalid("malformed login response")),
+        }
     }
 }

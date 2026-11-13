@@ -230,6 +230,7 @@ fn connection(endpoint: &Endpoint) -> Connection {
         settle: Duration::ZERO,
         ntp_server: String::new(),
         dtr: false,
+        password: None,
     }
 }
 

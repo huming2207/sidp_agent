@@ -1,11 +1,13 @@
 //! Command-line USB SIDP to local GDB bridge and Soul Injector job manager.
 //! See `sidp-agent --help`.
 mod commands;
+mod network_commands;
 mod power_commands;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use commands::{Connection, DeviceSession, JobSource};
 use sidp_agent::{
+    listener::{Event, Listener},
     manage, power,
     session::{self, ResetKind},
 };
@@ -36,6 +38,18 @@ struct GdbOptions {
     /// Hold the target in reset while connecting, for firmware that sleeps or reuses the SWD pins.
     #[arg(long)]
     connect_under_reset: bool,
+    /// Cache flash reads until the target runs again: on by default over
+    /// WiFi, off over USB. Turn it off when another core or bus master may
+    /// write flash while this core is halted. Also `monitor flash-cache on|off`.
+    #[arg(long, value_enum)]
+    flash_cache: Option<Toggle>,
+}
+
+/// On or off.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Toggle {
+    On,
+    Off,
 }
 #[derive(Subcommand)]
 enum Command {
@@ -89,6 +103,59 @@ enum Command {
     Power {
         #[command(subcommand)]
         command: PowerCommand,
+    },
+    /// Hold Soul Injectors that connect over WiFi, for other commands to use
+    /// with --port ws://127.0.0.1/DEVICE_ID. Runs until stopped.
+    Serve {
+        /// Address and port to listen on; the port must match the devices'
+        /// server URL.
+        #[arg(long, default_value = "0.0.0.0:80")]
+        listen: SocketAddr,
+    },
+    /// Set up how the device connects over WiFi.
+    Network {
+        #[command(subcommand)]
+        command: NetworkCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum NetworkCommand {
+    /// Show the stored network settings and the connection state.
+    Show {
+        #[command(flatten)]
+        connection: Connection,
+    },
+    /// Store WiFi and server settings over USB; the device uses them after a restart.
+    Set {
+        #[command(flatten)]
+        connection: Connection,
+        /// WiFi network name.
+        #[arg(long)]
+        ssid: String,
+        /// Where the device connects to: this computer as the device sees it,
+        /// e.g. ws://my-laptop.local/ (port 80) or ws://192.168.1.20:8080/.
+        /// Defaults to this computer's mDNS name, ws://HOSTNAME.local/.
+        #[arg(long)]
+        server: Option<String>,
+        /// WiFi password; asked for when omitted (empty for an open network).
+        #[arg(long, conflicts_with = "keep_wifi_password")]
+        wifi_password: Option<String>,
+        /// Keep the WiFi password already stored on the device.
+        #[arg(long)]
+        keep_wifi_password: bool,
+        /// Device password, needed to use the device over the network; asked
+        /// for when omitted. Only a salt and verifier are stored on the device.
+        #[arg(long, conflicts_with = "keep_password")]
+        new_password: Option<String>,
+        /// Keep the device password already stored.
+        #[arg(long)]
+        keep_password: bool,
+    },
+    /// Turn networking off over USB; the stored settings are kept.
+    Off {
+        #[command(flatten)]
+        connection: Connection,
     },
 }
 
@@ -278,6 +345,39 @@ fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 },
         } => commands::log_pull(&connection, &output, no_ack),
         Command::Power { command } => run_power_command(command),
+        Command::Serve { listen } => {
+            let listener = Listener::start(listen, |event| match event {
+                Event::Connected { id, peer } => println!("{id} connected from {peer}"),
+                Event::Disconnected { id } => println!("{id} disconnected"),
+            })?;
+            let port = listener.local_addr().port();
+            println!(
+                "Listening on {}. Use a device with --port ws://127.0.0.1:{port}/DEVICE_ID",
+                listener.local_addr()
+            );
+            loop {
+                std::thread::park();
+            }
+        }
+        Command::Network { command } => match command {
+            NetworkCommand::Show { connection } => network_commands::show(&connection),
+            NetworkCommand::Set {
+                connection,
+                ssid,
+                server,
+                wifi_password,
+                keep_wifi_password,
+                new_password,
+                keep_password,
+            } => network_commands::set(
+                &connection,
+                &ssid,
+                server,
+                network_commands::Secret::new(wifi_password, keep_wifi_password),
+                network_commands::Secret::new(new_password, keep_password),
+            ),
+            NetworkCommand::Off { connection } => network_commands::off(&connection),
+        },
     }
 }
 
@@ -353,6 +453,9 @@ fn program_and_serve(
 }
 
 fn attach(session: &mut DeviceSession, options: &GdbOptions) -> session::Result<()> {
+    if let Some(toggle) = options.flash_cache {
+        session.set_flash_cache(toggle == Toggle::On);
+    }
     if options.connect_under_reset {
         session.attach_under_reset()
     } else {
@@ -367,8 +470,10 @@ fn serve_gdb(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let info = session.info().unwrap();
     eprintln!(
-        "Attached profile={} capabilities=0x{:x}",
-        info.profile, info.capabilities
+        "Attached profile={} capabilities=0x{:x} flash cache={}",
+        info.profile,
+        info.capabilities,
+        if session.flash_cache() { "on" } else { "off" }
     );
     println!("GDB listening on {}", listener.local_addr()?);
     let served = sidp_agent::gdb::serve(listener, session, options.resume_on_detach)?;

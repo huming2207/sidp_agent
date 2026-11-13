@@ -8,6 +8,7 @@ pub mod app;
 mod assets;
 mod main_panel;
 mod modes;
+mod network;
 pub mod power;
 mod settings;
 mod sidebar;

@@ -3,11 +3,13 @@ use super::{
     app::{Activity, AppView},
     widgets::{detail, dot, group_heading, icon_button, level_color},
 };
-use crate::{describe, worker::Level};
+use crate::{describe, ports, worker::Level};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
-    h_flex, v_flex,
+    h_flex,
+    input::Input,
+    v_flex,
 };
 use gpui_kit::{
     AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement,
@@ -161,7 +163,26 @@ impl AppView {
         if self.selected_port().is_some() {
             column = column.child(self.render_device_details(cx));
         }
-        column.into_any_element()
+
+        // WiFi setup is stored over USB, so it needs a USB Soul Injector.
+        let on_usb = self
+            .selected_port()
+            .is_some_and(|p| p.soul_injector && !ports::is_network(&p.path));
+        let network = Button::new("network")
+            .small()
+            .outline()
+            .icon(IconName::Globe)
+            .label("WiFi setup…")
+            .disabled(busy || !on_usb)
+            .tooltip(if on_usb {
+                "Set the WiFi network, device password and server this Soul Injector uses"
+            } else {
+                "Connect a Soul Injector with a USB cable to set up its WiFi"
+            })
+            .on_click(cx.listener(|this, _, window, cx| this.open_network(window, cx)));
+        column
+            .child(h_flex().mx_3().pt_2().child(network))
+            .into_any_element()
     }
 
     fn render_device_details(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -176,6 +197,32 @@ impl AppView {
                     .text_color(level_color(Level::Error, cx))
                     .child(error.clone()),
             );
+        }
+
+        if self
+            .selected_port()
+            .is_some_and(|p| self.needs_password(&p.path))
+        {
+            return details
+                .child(div().text_xs().text_color(theme.muted_foreground).child(
+                    "On WiFi: enter its device password. It is saved in the system keychain.",
+                ))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(div().flex_1().child(Input::new(&self.login_input).small()))
+                        .child(
+                            Button::new("log-in")
+                                .small()
+                                .primary()
+                                .label("Connect")
+                                .disabled(busy)
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.log_in(window, cx)),
+                                ),
+                        ),
+                )
+                .into_any_element();
         }
 
         let Some(device) = self.device_snapshot() else {
@@ -276,7 +323,9 @@ impl AppView {
         } else {
             pull.outline()
         };
-        details.child(div().pt_2().child(pull)).into_any_element()
+        details
+            .child(h_flex().pt_2().child(pull))
+            .into_any_element()
     }
 
     fn render_profiles(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {

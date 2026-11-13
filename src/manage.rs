@@ -1,5 +1,5 @@
-//! Soul Injector management service: device info, asset upload, jobs and
-//! the production log.
+//! Soul Injector management service: device info, asset upload, jobs, the
+//! production log and network settings.
 //!
 //! These are SIDP opcodes 0x0100 and up. Payloads are the protobuf messages in
 //! `proto/manage.proto` (a copy of sidp_client's; keep them identical),
@@ -41,9 +41,19 @@ pub const JOB_CANCEL: u16 = 0x0123;
 pub const LOG_READ: u16 = 0x0130;
 /// LOG_ACK opcode.
 pub const LOG_ACK: u16 = 0x0131;
+/// NET_CONFIG_GET opcode.
+pub const NET_CONFIG_GET: u16 = 0x0140;
+/// NET_CONFIG_SET opcode; the device accepts it over USB only.
+pub const NET_CONFIG_SET: u16 = 0x0141;
+/// NET_STATUS opcode.
+pub const NET_STATUS: u16 = 0x0142;
+/// LOGIN opcode: one step of the password login (`login` module).
+pub const LOGIN: u16 = 0x0150;
 
 /// Status returned while the production log must be collected before a run.
 pub const STATUS_LOG_FULL: i32 = 30;
+/// Status of every request over the network before the login, and of a failed login.
+pub const STATUS_UNAUTHORIZED: i32 = 31;
 
 /// Asset name a new job is uploaded under before JOB_SET activates it.
 pub const STAGED_JOB_NAME: &str = "job.pb.new";
@@ -150,6 +160,9 @@ pub fn describe_status(status: i32) -> &'static str {
         3 => "not supported by this firmware",
         4 => "device busy: a programming run is in progress",
         STATUS_LOG_FULL => "production log full: collect it with `sidp-agent log pull`",
+        STATUS_UNAUTHORIZED => {
+            "login refused: wrong password, or the Soul Injector's password was changed"
+        }
         _ => "device error (see the device log)",
     }
 }

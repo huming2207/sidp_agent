@@ -1,6 +1,11 @@
 //! Bounded RAM/Flash transfers and conservative stack-cache reads.
 use super::*;
 
+/// Flash cache block: one aligned read covers GDB's small reads around the PC.
+const FLASH_BLOCK: u64 = 64;
+/// At most 16 KiB of flash is kept per stop.
+const FLASH_BLOCKS_PER_STOP: usize = 256;
+
 impl<T: Transport> Session<T> {
     fn region(&self, address: u64, len: usize, write: bool) -> Result<Region> {
         let info = self.info.as_ref().ok_or(Error::State("not attached"))?;
@@ -25,7 +30,8 @@ impl<T: Transport> Session<T> {
         Ok(region.clone())
     }
     /// Read halted RAM/Flash in chunks bounded by the advertised transfer limit.
-    /// Only the current stop's cacheable, nonvolatile RAM snapshot is cached.
+    /// The current stop's cacheable, nonvolatile RAM snapshot is used, and
+    /// small flash reads are cached for the stop when the flash cache is on.
     /// MMIO is rejected because GDB byte reads lack an explicit access width.
     pub fn read_memory(&mut self, address: u64, out: &mut [u8]) -> Result<()> {
         let generation = self.generation()?;
@@ -49,6 +55,55 @@ impl<T: Transport> Session<T> {
             out.copy_from_slice(bytes);
             return Ok(());
         }
+        let limit = self.info.as_ref().unwrap().max_transfer;
+        if region.kind == 2
+            && self.flash_cache
+            && out.len() as u64 <= FLASH_BLOCK
+            && limit as u64 >= FLASH_BLOCK
+        {
+            return self.read_flash_cached(generation, &region, address, out);
+        }
+        self.read_exact(generation, address, out)
+    }
+    /// Copies `out` from the aligned blocks that cover it, reading each block
+    /// once per stop. Blocks are clipped to the region.
+    fn read_flash_cached(
+        &mut self,
+        generation: u32,
+        region: &Region,
+        address: u64,
+        out: &mut [u8],
+    ) -> Result<()> {
+        let end = address + out.len() as u64;
+        let mut block = address & !(FLASH_BLOCK - 1);
+        while block < end {
+            let start = block.max(region.start);
+            let bytes =
+                self.flash_block(generation, start, (block + FLASH_BLOCK).min(region.end))?;
+            let from = address.max(start);
+            let to = end.min(start + bytes.len() as u64);
+            out[(from - address) as usize..(to - address) as usize]
+                .copy_from_slice(&bytes[(from - start) as usize..(to - start) as usize]);
+            block += FLASH_BLOCK;
+        }
+        Ok(())
+    }
+    fn flash_block(&mut self, generation: u32, start: u64, end: u64) -> Result<Vec<u8>> {
+        let stop = self.stop.as_ref().unwrap();
+        if let Some((_, bytes)) = stop.flash.iter().find(|(at, _)| *at == start) {
+            return Ok(bytes.clone());
+        }
+        let mut bytes = vec![0; (end - start) as usize];
+        self.read_exact(generation, start, &mut bytes)?;
+        if let Some(stop) = self.stop.as_mut()
+            && stop.flash.len() < FLASH_BLOCKS_PER_STOP
+        {
+            stop.flash.push((start, bytes.clone()));
+        }
+        Ok(bytes)
+    }
+    /// Reads target memory as requested, split only at the transfer limit.
+    fn read_exact(&mut self, generation: u32, address: u64, out: &mut [u8]) -> Result<()> {
         let limit = self.info.as_ref().unwrap().max_transfer;
         for (index, chunk) in out.chunks_mut(limit).enumerate() {
             let addr = address + (index * limit) as u64;

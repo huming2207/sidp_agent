@@ -3,11 +3,12 @@
 use super::*;
 use gdbstub::{
     common::Signal,
+    conn::Connection,
     stub::{GdbStub, SingleThreadStopReason, state_machine::GdbStubStateMachine as Machine},
 };
 use std::{
     collections::VecDeque,
-    io::{self, Read},
+    io::{self, Read, Write},
     net::{TcpListener, TcpStream},
     time::{Duration, Instant},
 };
@@ -51,11 +52,20 @@ pub fn serve<T: Transport>(
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
     stream.set_read_timeout(Some(Duration::from_millis(1)))?;
     let mut reader = stream.try_clone()?;
-    let mut machine = GdbStub::new(stream).run_state_machine(&mut target)?;
+    let buffered = Buffered {
+        stream,
+        out: Vec::new(),
+    };
+    let mut machine = GdbStub::new(buffered).run_state_machine(&mut target)?;
     let mut input = VecDeque::new();
     let mut polled = Instant::now();
     loop {
-        if input.is_empty() || polled.elapsed() >= Duration::from_millis(10) {
+        if matches!(machine, Machine::Idle(_)) {
+            // Halted: GDB's packets come first, so wait on its socket (in
+            // next_byte) and only look at the device. While the target runs,
+            // waiting on the device is what notices the stop promptly.
+            target.session.poll(Duration::ZERO)?;
+        } else if input.is_empty() || polled.elapsed() >= Duration::from_millis(10) {
             target.session.poll(Duration::from_millis(1))?;
             polled = Instant::now();
         }
@@ -99,6 +109,35 @@ pub fn serve<T: Transport>(
                 });
             }
         };
+    }
+}
+/// GDB's side of the connection, sent a packet at a time.
+///
+/// gdbstub writes a reply byte by byte, and with TCP_NODELAY each byte would be
+/// its own segment. Bytes wait for the flush gdbstub does after each reply. An
+/// acknowledgement is sent at once: after a step or continue it is followed by
+/// no flush until the target stops, and GDB waits for it.
+struct Buffered {
+    stream: TcpStream,
+    out: Vec<u8>,
+}
+impl Connection for Buffered {
+    type Error = io::Error;
+    fn write(&mut self, byte: u8) -> io::Result<()> {
+        if byte == b'+' && self.out.is_empty() {
+            return Write::write_all(&mut self.stream, &[byte]);
+        }
+        self.out.push(byte);
+        Ok(())
+    }
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        self.out.extend_from_slice(buf);
+        Ok(())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Write::write_all(&mut self.stream, &self.out)?;
+        self.out.clear();
+        Write::flush(&mut self.stream)
     }
 }
 fn next_byte(stream: &mut TcpStream, input: &mut VecDeque<u8>) -> io::Result<Option<u8>> {

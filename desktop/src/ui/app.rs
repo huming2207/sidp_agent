@@ -10,7 +10,8 @@ use crate::{
     target::{self, BuiltJob, Family, TargetSummary},
     toolchain::{self, Gdb},
     worker::{
-        Connection, DebugPlan, DeviceSnapshot, Event, GdbState, Level, Operation, Outcome, Worker,
+        Connection, DebugPlan, DeviceSnapshot, Event, GdbState, Level, NetworkSnapshot, Operation,
+        Outcome, Worker,
     },
 };
 use futures::{StreamExt as _, channel::mpsc};
@@ -24,11 +25,21 @@ use gpui_kit::{
     AppContext as _, ClipboardItem, Context, Entity, PathPromptOptions, SharedString, Subscription,
     Task, Window,
 };
+use sidp_agent::listener::Listener;
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, HashSet, VecDeque},
+    net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
+
+/// Keychain entry of a device's password.
+fn credential_url(device_id: &str) -> String {
+    format!("sidp://{device_id}")
+}
+/// User name stored with it; the login's user name.
+const CREDENTIAL_USER: &str = sidp_agent::login::USERNAME;
 
 /// Lines kept in the activity log.
 const LOG_LIMIT: usize = 500;
@@ -56,6 +67,8 @@ pub enum Activity {
     Power,
     /// Measuring the power profiler's zero offset.
     PowerZero,
+    /// Reading or storing network settings.
+    Network,
 }
 
 /// The operation in progress.
@@ -149,6 +162,21 @@ pub struct AppView {
     pub(super) ntp_input: Entity<InputState>,
     pub(super) timeout_input: Entity<InputState>,
     pub(super) settle_input: Entity<InputState>,
+    pub(super) ssid_input: Entity<InputState>,
+    pub(super) wifi_password_input: Entity<InputState>,
+    pub(super) server_input: Entity<InputState>,
+    pub(super) device_password_input: Entity<InputState>,
+    pub(super) listen_port_input: Entity<InputState>,
+    /// The password typed for a device on WiFi.
+    pub(super) login_input: Entity<InputState>,
+    /// Holds Soul Injectors that connect over WiFi; none in tests.
+    listener: Option<Arc<Listener>>,
+    /// Passwords of devices on WiFi, by port; also kept in the system keychain.
+    passwords: HashMap<String, String>,
+    /// Ports whose password was looked up in the keychain this run.
+    recalled: HashSet<String>,
+    pub(super) network_enabled: bool,
+    pub(super) network: Option<NetworkSnapshot>,
 
     pub(super) summary: Option<Result<TargetSummary, String>>,
     pub(super) readiness: Readiness,
@@ -208,8 +236,22 @@ impl AppView {
     /// ports for Soul Injectors.
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut this = Self::open(State::default_path(), window, cx);
+        this.start_listener();
         this.watch_ports(window, cx);
         this
+    }
+
+    /// Listens for Soul Injectors on WiFi. Failing leaves USB working.
+    fn start_listener(&mut self) {
+        let port = self.state.settings.listen_port;
+        let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+        match Listener::start(address, |_| {}) {
+            Ok(listener) => self.listener = Some(Arc::new(listener)),
+            Err(error) => self.add_log(
+                Level::Warning,
+                format!("Soul Injectors on WiFi cannot connect: {error}"),
+            ),
+        }
     }
 
     /// Builds the view with the state saved in `state_path` (none: nothing is
@@ -239,6 +281,21 @@ impl AppView {
             ntp_input: text_input(sidp_agent::ntp::DEFAULT_SERVER, window, cx),
             timeout_input: number_input(window, cx),
             settle_input: number_input(window, cx),
+            ssid_input: text_input("Network name", window, cx),
+            wifi_password_input: cx.new(|cx| InputState::new(window, cx).masked(true)),
+            server_input: text_input("ws://ADDRESS/", window, cx),
+            device_password_input: cx.new(|cx| InputState::new(window, cx).masked(true)),
+            listen_port_input: number_input(window, cx),
+            login_input: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .masked(true)
+                    .placeholder("Device password")
+            }),
+            listener: None,
+            passwords: HashMap::new(),
+            recalled: HashSet::new(),
+            network_enabled: true,
+            network: None,
             image_inputs: Vec::new(),
             variant_select,
             gdb_select,
@@ -439,6 +496,14 @@ impl AppView {
                 this.save_soon(cx);
             }
         });
+        on_change(&self.listen_port_input, |this, value, _, cx| {
+            if let Ok(port) = value.parse::<u16>()
+                && port != 0
+            {
+                this.state.settings.listen_port = port;
+                this.save_soon(cx);
+            }
+        });
         on_change(&self.settle_input, |this, value, _, cx| {
             if let Ok(ms) = value.parse::<u64>()
                 && ms <= 10_000
@@ -551,6 +616,9 @@ impl AppView {
         });
         self.settle_input.update(cx, |input, cx| {
             input.set_value(settings.settle_ms.to_string(), window, cx)
+        });
+        self.listen_port_input.update(cx, |input, cx| {
+            input.set_value(settings.listen_port.to_string(), window, cx)
         });
     }
 
@@ -938,13 +1006,22 @@ impl AppView {
 
     // ---- Devices ---------------------------------------------------------------
 
-    /// Lists USB ports every few seconds to notice plugging and unplugging.
+    /// Lists USB ports, and devices connected over WiFi, every few seconds to
+    /// notice them coming and going. USB devices come first.
     fn watch_ports(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let listener = self.listener.clone();
         let task = cx.spawn_in(window, async move |this, cx| {
             loop {
+                let listener = listener.clone();
                 let ports = cx
                     .background_executor()
-                    .spawn(async { ports::list() })
+                    .spawn(async move {
+                        let mut ports = ports::list()?;
+                        if let Some(listener) = &listener {
+                            ports.extend(ports::network(listener));
+                        }
+                        Ok(ports)
+                    })
                     .await;
                 if this
                     .update_in(cx, |this, window, cx| this.on_ports(ports, window, cx))
@@ -1040,6 +1117,7 @@ impl AppView {
     fn connection(&self, port: String) -> Connection {
         let settings = &self.state.settings;
         Connection {
+            password: self.passwords.get(&port).cloned(),
             port,
             timeout: Duration::from_millis(settings.timeout_ms),
             settle: Duration::from_millis(settings.settle_ms),
@@ -1061,14 +1139,96 @@ impl AppView {
 
     /// Why device actions are unavailable, if they are.
     pub fn device_blocker(&self) -> Option<&'static str> {
-        if self.selected_port().is_none() {
-            Some("Connect a Soul Injector with a USB cable.")
-        } else {
-            None
+        match self.selected_port() {
+            None => Some("Connect a Soul Injector with a USB cable."),
+            Some(port) if self.needs_password(&port.path) => {
+                Some("Enter the device password to use this Soul Injector on WiFi.")
+            }
+            Some(_) => None,
         }
     }
 
-    fn start(&mut self, activity: Activity, operation: Operation, cx: &mut Context<Self>) {
+    /// A device on WiFi whose password has not been typed yet.
+    pub fn needs_password(&self, path: &str) -> bool {
+        ports::is_network(path) && !self.passwords.contains_key(path)
+    }
+
+    /// Remembers the typed password for the chosen device and reads its status.
+    pub fn log_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.selected_port().map(|p| p.path.clone()) else {
+            return;
+        };
+        let password = self.login_input.read(cx).value().to_string();
+        if password.is_empty() {
+            return;
+        }
+        self.login_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        if let Some(id) = ports::device_id(&path) {
+            let write =
+                cx.write_credentials(&credential_url(id), CREDENTIAL_USER, password.as_bytes());
+            cx.spawn(async move |this, cx| {
+                if let Err(error) = write.await {
+                    let _ = this.update(cx, |this, cx| {
+                        this.add_log(
+                            Level::Warning,
+                            format!(
+                                "The password could not be saved in the system keychain: {error}"
+                            ),
+                        );
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
+        }
+        self.passwords.insert(path, password);
+        self.inspect(window, cx);
+    }
+
+    /// Looks the device's password up in the system keychain, once per run,
+    /// and reads the device's status when one is found.
+    fn recall_password(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = ports::device_id(&path) else {
+            return;
+        };
+        if !self.recalled.insert(path.clone()) {
+            return;
+        }
+        let read = cx.read_credentials(&credential_url(id));
+        cx.spawn_in(window, async move |this, cx| {
+            let stored = read.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match stored {
+                    Ok(Some((_, secret))) => {
+                        if let Ok(password) = String::from_utf8(secret) {
+                            this.passwords.insert(path, password);
+                            this.inspect(window, cx);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => this.add_log(
+                        Level::Warning,
+                        format!("The system keychain could not be read: {error}"),
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The kind of operation running, if any.
+    pub fn running_activity(&self) -> Option<Activity> {
+        self.running.as_ref().map(|r| r.activity)
+    }
+
+    pub(super) fn start(
+        &mut self,
+        activity: Activity,
+        operation: Operation,
+        cx: &mut Context<Self>,
+    ) {
         if self.worker.is_some() {
             return;
         }
@@ -1144,8 +1304,16 @@ impl AppView {
     }
 
     /// Reads device and job status.
-    pub fn inspect(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if !self.is_busy() && self.selected_port().is_some() {
+    pub fn inspect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(path) = self
+            .selected_port()
+            .map(|p| p.path.clone())
+            .filter(|path| self.needs_password(path))
+        {
+            self.recall_password(path, window, cx);
+            return;
+        }
+        if !self.is_busy() && self.device_blocker().is_none() {
             self.start(Activity::Inspect, Operation::Inspect, cx);
         }
     }
@@ -1261,6 +1429,16 @@ impl AppView {
                 self.device_error = None;
             }
             Event::Gdb(state) => self.gdb_state = state,
+            Event::Network(snapshot) => self.show_network(snapshot, window, cx),
+            // Ask again; the failure itself explains why.
+            Event::LoginRefused => {
+                if let Some(path) = self.selected_port().map(|p| p.path.clone()) {
+                    self.passwords.remove(&path);
+                    if let Some(id) = ports::device_id(&path) {
+                        cx.delete_credentials(&credential_url(id)).detach();
+                    }
+                }
+            }
             Event::PowerZero { serial, zero } => {
                 self.state.settings.power_zero.insert(serial, zero);
                 self.save_soon(cx);

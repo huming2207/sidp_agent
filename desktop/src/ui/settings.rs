@@ -60,6 +60,11 @@ impl AppView {
                             div().w(px(140.)).child(Input::new(&this.settle_input)).into_any_element(),
                         ))
                         .child(row(
+                            "WiFi port",
+                            "Port Soul Injectors on WiFi connect to; it must match their server address. Ports below 1024 need permission on Linux. Used from the next start.",
+                            div().w(px(140.)).child(Input::new(&this.listen_port_input)).into_any_element(),
+                        ))
+                        .child(row(
                             "Production log file",
                             "Pulled entries are appended here, one JSON object per line.",
                             v_flex()

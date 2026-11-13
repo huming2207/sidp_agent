@@ -126,6 +126,55 @@ request's timeout, and lost power data shows as a gap. `power record` reports
 how many were dropped ("damaged on the wire"). Rev 8 sends roughly one damaged
 frame per 1400 at 588 µs; the device-side cause is not found yet.
 
+## WiFi (preview)
+
+Rev 8 can serve SIDP over WiFi. The Soul Injector connects to this computer,
+so set it up over USB, restart it, and keep `sidp-agent serve` (or the desktop
+app) running to hold it. Other commands then use it by its device ID:
+
+```sh
+cargo run -- network set --port /dev/ttyACM0 --ssid OfficeWiFi   # asks for both passwords
+cargo run -- network show --port /dev/ttyACM0                    # shows the device ID
+cargo run -- serve                                               # listens on 0.0.0.0:80
+cargo run -- gdb --port ws://127.0.0.1/7CDFA1B2C3D4              # in another terminal
+```
+
+The device ID is the Soul Injector's factory WiFi MAC address, 12 hex digits
+(`7c:df:a1:b2:c3:d4` is accepted too). `serve` lists devices as they connect
+and forwards each command's connection to its device unchanged, login
+included; it accepts commands only from this computer, and one at a time per
+device (a second is told the device is in use). It drops a device that has
+been silent for 30 s (devices ping every 10 s). Without `serve`,
+`--port ws://0.0.0.0` makes a single command wait for the device itself.
+
+`network set` asks for the WiFi password and for a device password, which is
+needed to use the Soul Injector over the network. Only an SRP salt and
+verifier made from it are stored on the device. Over WiFi every command logs
+in first, with `--password`, `SIDP_PASSWORD`, or a prompt; the password never
+crosses the network, and the device proves it knows it too (`login` module:
+the SRP6a handshake of ESP-IDF's protocomm Security 2).
+
+The device connects to `ws://HOSTNAME.local/` by default: this computer's
+mDNS name, so it follows the computer when its address changes and never
+reaches a colleague's agent. Linux (Avahi) and macOS answer for that name;
+`--server ws://ADDRESS[:PORT]/` sets a fixed address instead. The port, 80
+unless given (443 is planned for TLS), is stored on the device as part of that
+URL, and `serve --listen 0.0.0.0:PORT` must use the same one. The firewall must
+accept that TCP port. On Linux, ports below 1024 need
+`sudo sysctl net.ipv4.ip_unprivileged_port_start=80` (or
+`sudo setcap cap_net_bind_service=+ep` on the binary), or a port above 1023;
+the agent says so when it cannot listen. A dropped device tries again within
+3 s.
+The device stays connected between SIDP connections; text messages do what
+DTR does on USB (`open`, `ready` or `busy`, `close`, `closed`). USB has
+priority: a USB request ends a WiFi connection, and the WiFi user is told.
+Settings are stored in the device's NVS (namespace `si.cfg`) and can only be
+changed over USB; `network off` turns WiFi off from the next restart.
+
+This follows `docs/en/network-debugging-plan.md` in the Soul Injector
+repository. Traffic after the login is not encrypted, so use it only on a
+network where nobody can read or alter traffic.
+
 ## CLI and GDB
 
 ```sh
@@ -158,6 +207,17 @@ firmware that sleeps or reuses the SWD pins soon after boot.
 pin. Both leave the target halted at its reset vector. GDB does not re-read
 registers after a monitor command, so run `maint flush register-cache` to see
 them; `continue` and `stepi` are unaffected.
+
+After each stop GDB reads the same few bytes of flash around the PC dozens of
+times. With the flash cache on, the agent reads each aligned 64-byte block of
+flash once and answers those reads from it until the target runs again (any
+continue, step or reset ends it). A halted core cannot change its flash, so
+the cache is safe unless something else writes flash while this core is
+halted: another core, or a flash operation started just before the halt on a
+part that does not stall reads during it. It is on by default over WiFi, where
+it makes `stepi` about 10× faster, and off over USB. `--flash-cache on|off` on
+`gdb` and `debug` overrides the default, and `monitor flash-cache [on|off]`
+shows or changes it during a session.
 
 Windows ports use names such as `COM3`; macOS commonly uses `/dev/cu.usbmodem*`.
 The device must expose the SIDP CDC interface and already have the firmware
@@ -200,6 +260,14 @@ detach. Additional cases verify that USB loss, invalid CRC and debugger EOF end
 the process without replay.
 
 Supply `--output /tmp/sidp-e2e` to retain diagnostic logs in a chosen directory.
+
+The login is checked against ESP-IDF's own Security 2 handler, built for this
+computer:
+
+```sh
+tests/e2e/srp_device/build.sh /tmp/srp     # needs IDF_PATH; Python with jsonschema, jinja2
+SIDP_SRP_DEVICE=/tmp/srp/srp-device cargo test --release login -- --include-ignored
+```
 The runner fails rather than silently skips if GDB or the C++ component is
 missing. `cargo test` needs neither of those tools nor any hardware.
 

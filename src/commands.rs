@@ -5,28 +5,39 @@ use sidp_agent::compile::{self, ImageHashes, Sources};
 use sidp_agent::manage::{
     self, hex, proto::Outcome, proto::RunResult, proto::Stage, proto::Trigger,
 };
-use sidp_agent::{ntp, session::Session, transport::UsbCdc};
+use sidp_agent::{
+    listener::is_device_id,
+    ntp,
+    session::Session,
+    transport::{Transport, UsbCdc, WEBSOCKET_PORT, WebSocket},
+};
 use std::{
     error::Error,
     fs::OpenOptions,
     io::{BufWriter, Write},
+    net::SocketAddr,
     path::{Path, PathBuf},
     time::Duration,
 };
 
 type CommandResult = Result<(), Box<dyn Error>>;
-/// An open connection to a device over USB.
-pub type DeviceSession = Session<UsbCdc>;
+/// An open connection to a device, over USB or WiFi.
+pub type DeviceSession = Session<Box<dyn Transport + Send>>;
 
 /// How often `job run --wait` polls the device.
 const RUN_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// How long to wait for each NTP server address.
 const NTP_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long to wait for a Soul Injector to connect over WiFi.
+const DEVICE_WAIT: Duration = Duration::from_secs(30);
 
-/// USB CDC connection options shared by every device command.
+/// Connection options shared by every device command.
 #[derive(Args)]
 pub struct Connection {
-    /// USB CDC path, e.g. /dev/ttyACM0 or COM3.
+    /// USB CDC path, e.g. /dev/ttyACM0 or COM3. Over WiFi:
+    /// ws://127.0.0.1/DEVICE_ID uses a device held by `sidp-agent serve` or
+    /// the desktop app; ws://0.0.0.0 waits for a device to connect to this
+    /// command. Port 80 unless given.
     #[arg(long)]
     port: String,
     /// CDC line coding; does not set SWD speed.
@@ -44,18 +55,71 @@ pub struct Connection {
     /// NTP server that gives the device its UTC clock.
     #[arg(long, default_value = ntp::DEFAULT_SERVER)]
     ntp_server: String,
+    /// Device password, for ws:// ports; otherwise SIDP_PASSWORD, or asked for.
+    #[arg(long)]
+    password: Option<String>,
 }
 
 impl Connection {
-    /// Opens a fresh SIDP connection.
-    pub fn open(&self) -> std::io::Result<DeviceSession> {
-        let usb = UsbCdc::open(
-            &self.port,
-            self.baud,
-            Duration::from_millis(self.settle_ms),
-            !self.no_dtr,
-        )?;
-        Ok(Session::new(usb, Duration::from_millis(self.timeout_ms)))
+    /// Opens a fresh SIDP connection, and logs in over the network.
+    pub fn open(&self) -> Result<DeviceSession, Box<dyn Error>> {
+        let timeout = Duration::from_millis(self.timeout_ms);
+        let Some(address) = self.port.strip_prefix("ws://") else {
+            let settle = Duration::from_millis(self.settle_ms);
+            let usb = UsbCdc::open(&self.port, self.baud, settle, !self.no_dtr)?;
+            return Ok(Session::new(Box::new(usb), timeout));
+        };
+        let (host, id) = address.split_once('/').unwrap_or((address, ""));
+        let host = with_default_port(host);
+        // Accept a MAC address written with separators or in lower case.
+        let id: String = id
+            .chars()
+            .filter(|c| !matches!(c, ':' | '-' | '/'))
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+        if !id.is_empty() && !is_device_id(&id) {
+            return Err(format!("--port {}: the device ID is 12 hex digits", self.port).into());
+        }
+        let password = match &self.password {
+            Some(password) => password.clone(),
+            None => match std::env::var("SIDP_PASSWORD") {
+                Ok(password) => password,
+                Err(_) => read_line("Device password (shown as typed): ")?,
+            },
+        };
+        let ws = if id.is_empty() {
+            let address: SocketAddr = host
+                .parse()
+                .map_err(|e| format!("--port {}: {e}; expected ws://ADDRESS[:PORT]", self.port))?;
+            eprintln!("Waiting for a Soul Injector to connect to {address}");
+            let ws = WebSocket::accept(address, DEVICE_WAIT)?;
+            eprintln!("Connected from {}", ws.peer());
+            ws
+        } else {
+            WebSocket::connect(&host, &id)?
+        };
+        let mut session: DeviceSession = Session::new(Box::new(ws), timeout);
+        // Every request crosses WiFi, so cache flash reads within a stop.
+        session.set_flash_cache(true);
+        session.login(&password)?;
+        Ok(session)
+    }
+
+    /// Whether this is a USB connection; network settings can only be changed over USB.
+    pub fn is_usb(&self) -> bool {
+        !self.port.starts_with("ws://")
+    }
+}
+
+/// `HOST[:PORT]` with port 80, the `ws://` default, when none is given.
+fn with_default_port(host: &str) -> String {
+    let has_port = host
+        .rsplit_once(':')
+        .is_some_and(|(_, port)| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()));
+    if has_port {
+        host.to_owned()
+    } else {
+        format!("{host}:{WEBSOCKET_PORT}")
     }
 }
 
@@ -87,6 +151,14 @@ struct BuiltJob {
     bytes: Vec<u8>,
     name: String,
     images: Vec<(String, Vec<u8>)>,
+}
+
+/// Reads one line from standard input after printing `prompt`.
+pub fn read_line(prompt: &str) -> std::io::Result<String> {
+    eprint!("{prompt}");
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_owned())
 }
 
 fn read_optional(path: Option<&Path>) -> std::io::Result<Option<String>> {
@@ -179,7 +251,7 @@ pub fn device_info(connection: &Connection) -> CommandResult {
 ///
 /// Without NTP, older firmware without SET_TIME, or a refused time, entries
 /// only lose their UTC times; a later command can still set the clock.
-fn set_device_time(session: &mut Session<UsbCdc>, connection: &Connection) {
+fn set_device_time(session: &mut DeviceSession, connection: &Connection) {
     let server = &connection.ntp_server;
     let time = match ntp::query(server, NTP_TIMEOUT) {
         Ok(time) => time,
