@@ -164,18 +164,23 @@ impl AppView {
             column = column.child(self.render_device_details(cx));
         }
 
-        // WiFi setup is stored over USB, so it needs a USB Soul Injector.
-        let on_usb = self
+        // A Soul Injector on WiFi needs its password before anything else.
+        let ready = self
             .selected_port()
-            .is_some_and(|p| p.soul_injector && !ports::is_network(&p.path));
+            .is_some_and(|p| p.soul_injector && !self.needs_password(&p.path));
         let network = Button::new("network")
             .small()
             .outline()
             .icon(IconName::Globe)
             .label("WiFi setup…")
-            .disabled(busy || !on_usb)
-            .tooltip(if on_usb {
+            .disabled(busy || !ready)
+            .tooltip(if ready {
                 "Set the WiFi network, device password and server this Soul Injector uses"
+            } else if self
+                .selected_port()
+                .is_some_and(|p| ports::is_network(&p.path))
+            {
+                "Enter the device password first"
             } else {
                 "Connect a Soul Injector with a USB cable to set up its WiFi"
             })

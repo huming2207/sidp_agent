@@ -34,10 +34,9 @@ impl AppView {
             let this = view.read(cx);
             let theme = cx.theme();
             let busy = this.is_busy();
-            // The device takes new settings only over USB.
-            let on_usb = this
+            let on_wifi = this
                 .selected_port()
-                .is_some_and(|p| !ports::is_network(&p.path));
+                .is_some_and(|p| ports::is_network(&p.path));
             let help = |text: SharedString| {
                 div()
                     .text_xs()
@@ -114,15 +113,18 @@ impl AppView {
                             .into(),
                         ))
                         .child(help(network_state(this.network.as_ref())))
-                        .when(!on_usb && this.selected_port().is_some(), |this| {
-                            this.child(help("Settings can only be changed over USB.".into()))
+                        .when(on_wifi, |this| {
+                            this.child(help(
+                                "Saved over WiFi: a mistyped network or password leaves the Soul Injector unreachable until it is set up again over USB."
+                                    .into(),
+                            ))
                         })
                         .child(
                             Button::new("save-network")
                                 .primary()
                                 .label("Save to the Soul Injector")
                                 .loading(busy && this.running_activity() == Some(Activity::Network))
-                                .disabled(busy || !on_usb)
+                                .disabled(busy || this.selected_port().is_none())
                                 .on_click(move |_, window, cx| {
                                     save.update(cx, |this, cx| this.save_network(window, cx))
                                 }),

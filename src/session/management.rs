@@ -113,7 +113,7 @@ impl<T: Transport> Session<T> {
         self.decode_response(&payload)
     }
 
-    /// Stores network settings for the device's next restart. USB only.
+    /// Stores network settings for the device's next restart.
     pub fn net_config_set(&mut self, config: &NetConfig) -> Result<()> {
         self.empty_request(NET_CONFIG_SET, config.encode_to_vec())
     }

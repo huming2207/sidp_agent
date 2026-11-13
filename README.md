@@ -168,8 +168,11 @@ the agent says so when it cannot listen. A dropped device tries again within
 The device stays connected between SIDP connections; text messages do what
 DTR does on USB (`open`, `ready` or `busy`, `close`, `closed`). USB has
 priority: a USB request ends a WiFi connection, and the WiFi user is told.
-Settings are stored in the device's NVS (namespace `si.cfg`) and can only be
-changed over USB; `network off` turns WiFi off from the next restart.
+Settings are stored in the device's NVS (namespace `si.cfg`). The first setup
+is over USB; after that `network set` and `network off` also work over WiFi
+(after the login). Changing them over WiFi can leave the device unreachable,
+for example with a mistyped WiFi password; set it up again over USB then.
+`network off` turns WiFi off from the next restart.
 
 This follows `docs/en/network-debugging-plan.md` in the Soul Injector
 repository. Traffic after the login is not encrypted, so use it only on a

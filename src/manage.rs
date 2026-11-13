@@ -43,7 +43,7 @@ pub const LOG_READ: u16 = 0x0130;
 pub const LOG_ACK: u16 = 0x0131;
 /// NET_CONFIG_GET opcode.
 pub const NET_CONFIG_GET: u16 = 0x0140;
-/// NET_CONFIG_SET opcode; the device accepts it over USB only.
+/// NET_CONFIG_SET opcode.
 pub const NET_CONFIG_SET: u16 = 0x0141;
 /// NET_STATUS opcode.
 pub const NET_STATUS: u16 = 0x0142;

@@ -109,11 +109,12 @@ last result, and pulls the production log (appended as JSON Lines to the file
 chosen in Settings). The Soul Injector is found by its USB product name, and
 plugging or unplugging it is noticed within two seconds.
 
-*WiFi setup…* under SOUL INJECTOR in the left column (enabled while a Soul Injector is connected over USB) sets up how a Soul Injector with WiFi (Rev 8)
+*WiFi setup…* under SOUL INJECTOR in the left column sets up how a Soul Injector with WiFi (Rev 8)
 connects to this computer: the WiFi network and password, the device password
 needed over the network, and the server address, which defaults to this
-computer. They are stored on the Soul Injector
-over USB and used after it restarts; the sheet also shows the device ID.
+computer. They are stored on the Soul Injector, over USB or over WiFi, and
+used after it restarts; the sheet also shows the device ID. The first setup
+has to be over USB.
 
 The app listens for Soul Injectors on WiFi while it runs (port 80, set under
 Settings, used from the next start). They appear under SOUL INJECTOR after the

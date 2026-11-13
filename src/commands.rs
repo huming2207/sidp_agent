@@ -104,11 +104,6 @@ impl Connection {
         session.login(&password)?;
         Ok(session)
     }
-
-    /// Whether this is a USB connection; network settings can only be changed over USB.
-    pub fn is_usb(&self) -> bool {
-        !self.port.starts_with("ws://")
-    }
 }
 
 /// `HOST[:PORT]` with port 80, the `ws://` default, when none is given.

@@ -83,9 +83,6 @@ pub fn set(
     wifi_password: Secret,
     password: Secret,
 ) -> CommandResult {
-    if !connection.is_usb() {
-        return Err("network settings can only be changed over USB".into());
-    }
     let server_url = match server {
         Some(server) => server,
         None => transport::default_server_url(),
@@ -129,9 +126,6 @@ pub fn set(
 
 /// `network off`.
 pub fn off(connection: &Connection) -> CommandResult {
-    if !connection.is_usb() {
-        return Err("network settings can only be changed over USB".into());
-    }
     let mut session = connection.open()?;
     let mut config = session.net_config_get()?;
     config.enabled = false;
