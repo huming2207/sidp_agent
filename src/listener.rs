@@ -85,6 +85,11 @@ struct Slot {
     peer: SocketAddr,
     writer: Arc<Writer>,
     user: Option<User>,
+    /// A user left with a session open; the device was told "close" and has
+    /// not answered "closed". Nobody else may open a session until it does:
+    /// the target is still being cleaned up, and the device's "closed" would
+    /// otherwise reach the next user as the answer to its "open".
+    cleaning_up: bool,
 }
 
 struct User {
@@ -204,6 +209,12 @@ fn serve(state: &State, stream: TcpStream) -> io::Result<()> {
         if slot.user.is_some() {
             return refuse(StatusCode::CONFLICT, "the device is in use");
         }
+        if slot.cleaning_up {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the device is cleaning up after the last user",
+            );
+        }
         slot.user = Some(User {
             connection,
             writer: writer.clone(),
@@ -249,6 +260,7 @@ fn serve_device(
             peer,
             writer: writer.clone(),
             user: None,
+            cleaning_up: false,
         },
     );
     // The same device connecting again: the old connection is dead.
@@ -275,18 +287,28 @@ fn serve_device(
             break;
         };
         let Some(user) = slot.user.as_mut() else {
-            // The user left before the device accepted: end that session.
-            if data == b"ready" {
-                let device = slot.writer.clone();
-                drop(devices);
-                let _ = device.send(OP_TEXT, b"close");
+            if opcode != OP_TEXT {
+                continue;
+            }
+            match data {
+                // The user left before the device accepted: end that session.
+                b"ready" => {
+                    slot.cleaning_up = true;
+                    let device = slot.writer.clone();
+                    drop(devices);
+                    let _ = device.send(OP_TEXT, b"close");
+                }
+                b"closed" => slot.cleaning_up = false,
+                _ => {}
             }
             continue;
         };
-        match data {
-            b"ready" => user.session = true,
-            b"closed" => user.session = false,
-            _ => {}
+        if opcode == OP_TEXT {
+            match data {
+                b"ready" => user.session = true,
+                b"closed" => user.session = false,
+                _ => {}
+            }
         }
         let user = user.writer.clone();
         drop(devices);
@@ -358,6 +380,7 @@ fn detach(state: &State, id: &str, connection: u64) {
         return;
     }
     if slot.user.take().is_some_and(|u| u.session) {
+        slot.cleaning_up = true;
         let device = slot.writer.clone();
         drop(devices);
         let _ = device.send(OP_TEXT, b"close");
@@ -561,6 +584,36 @@ mod tests {
         // Gone without "close", as when the program is killed.
         raw.get_ref().shutdown(Shutdown::Both).unwrap();
         expect_text(&mut device, "close");
+    }
+
+    #[test]
+    fn the_next_user_waits_until_the_device_has_cleaned_up() {
+        let (listener, events) = start();
+        let mut device = device(&listener);
+        events.recv().unwrap();
+        let address = listener.local_addr();
+        let stream = TcpStream::connect(address).unwrap();
+        let (mut raw, _) = tungstenite::client(format!("ws://{address}/{ID}"), stream).unwrap();
+        raw.send(Message::text("open")).unwrap();
+        expect_text(&mut device, "open");
+        device.send(Message::text("ready")).unwrap();
+        expect_text(&mut raw, "ready");
+        raw.get_ref().shutdown(Shutdown::Both).unwrap();
+        expect_text(&mut device, "close");
+
+        // The next user connects while the target is still being cleaned up.
+        let next = thread::spawn(move || user(&listener).map(|ws| (ws, listener)));
+        thread::sleep(Duration::from_millis(300));
+        assert!(!next.is_finished(), "let in before the device answered");
+        device.send(Message::text("closed")).unwrap();
+        // Its "open" reaches the device only now, and "ready" answers it.
+        expect_text(&mut device, "open");
+        device.send(Message::text("ready")).unwrap();
+        let (ws, listener) = next.join().unwrap().unwrap();
+        assert!(listener.devices()[0].in_use);
+        // The device leaves first, so the user does not wait for "closed".
+        drop(device);
+        drop(ws);
     }
 
     #[test]

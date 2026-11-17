@@ -233,7 +233,29 @@ impl WebSocket {
     /// Uses the Soul Injector `device_id` through the agent listening at
     /// `address` (`HOST:PORT`) on this computer: `sidp-agent serve` or the
     /// desktop app.
+    /// While the device cleans up after its last user, this waits for it.
     pub fn connect(address: &str, device_id: &str) -> io::Result<Self> {
+        let deadline = Instant::now() + WEBSOCKET_SESSION_TIMEOUT;
+        loop {
+            match Self::try_connect(address, device_id) {
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::ResourceBusy,
+                        format!(
+                            "Soul Injector {device_id} did not finish cleaning up after its last \
+                             user; restart it if this persists"
+                        ),
+                    ));
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn try_connect(address: &str, device_id: &str) -> io::Result<Self> {
         let stream = TcpStream::connect(address)?;
         let peer = stream.peer_addr()?;
         stream.set_nodelay(true)?;
@@ -243,6 +265,8 @@ impl WebSocket {
             Ok((socket, _)) => socket,
             Err(tungstenite::HandshakeError::Failure(tungstenite::Error::Http(response))) => {
                 let (kind, text) = match response.status().as_u16() {
+                    // The listener waits for the device's "closed"; try again shortly.
+                    503 => (io::ErrorKind::WouldBlock, String::new()),
                     404 => (
                         io::ErrorKind::NotFound,
                         format!(
