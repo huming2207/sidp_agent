@@ -72,6 +72,7 @@ impl<T: Transport> HwBreakpoint for Adapter<T> {
 }
 impl<T: Transport> MonitorCmd for Adapter<T> {
     fn handle_monitor_cmd(&mut self, cmd: &[u8], mut out: ConsoleOutput<'_>) -> Result<(), Error> {
+        let cmd = cmd.trim_ascii();
         let kind = match cmd {
             b"reset" | b"reset system" => ResetKind::System,
             b"reset nrst" => ResetKind::Nrst,
