@@ -117,6 +117,7 @@ impl Transport for UsbCdc {
 
     fn receive(&mut self, timeout: Duration) -> io::Result<Option<Frame>> {
         let deadline = Instant::now() + timeout;
+        let mut tried = false;
         loop {
             while let Some(byte) = self.input.pop_front() {
                 if let Some(packet) = self.decoder.push(byte) {
@@ -127,9 +128,10 @@ impl Transport for UsbCdc {
                 }
             }
             let time = deadline.saturating_duration_since(Instant::now());
-            if time.is_zero() {
+            if time.is_zero() && tried {
                 return Ok(None);
             }
+            tried = true;
             let port = self
                 .port
                 .as_mut()

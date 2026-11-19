@@ -155,4 +155,18 @@ impl<T: Transport> Session<T> {
         }
         Ok(())
     }
+    /// Drain immediately available unsolicited events without waiting.
+    pub(crate) fn poll_ready(&mut self) -> Result<()> {
+        if self.closed {
+            return Err(Error::State("connection closed"));
+        }
+        // Bound per-tick work so a continuous stream cannot starve GDB packets.
+        for _ in 0..64 {
+            let Some(frame) = self.receive(Duration::ZERO)? else {
+                break;
+            };
+            self.event(frame)?;
+        }
+        Ok(())
+    }
 }

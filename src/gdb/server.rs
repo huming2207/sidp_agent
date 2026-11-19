@@ -62,9 +62,9 @@ pub fn serve<T: Transport>(
     loop {
         if matches!(machine, Machine::Idle(_)) {
             // Halted: GDB's packets come first, so wait on its socket (in
-            // next_byte) and only look at the device. While the target runs,
-            // waiting on the device is what notices the stop promptly.
-            target.session.poll(Duration::ZERO)?;
+            // next_byte) and drain whatever the device already sent. While the
+            // target runs, waiting on the device is what notices the stop promptly.
+            target.session.poll_ready()?;
         } else if input.is_empty() || polled.elapsed() >= Duration::from_millis(10) {
             target.session.poll(Duration::from_millis(1))?;
             polled = Instant::now();
