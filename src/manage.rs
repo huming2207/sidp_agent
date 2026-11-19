@@ -178,6 +178,11 @@ pub fn read_log<T: Transport>(
         let Some(last) = response.entries.last() else {
             return Ok(entries);
         };
+        if last.id <= after_id {
+            return Err(crate::session::Error::Io(codec::invalid(
+                "production log entry ID did not advance",
+            )));
+        }
         after_id = last.id;
         entries.extend(response.entries);
     }
