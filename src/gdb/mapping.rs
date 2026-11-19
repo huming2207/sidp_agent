@@ -18,6 +18,10 @@ fn memory_map(info: &TargetInfo) -> String {
         "<?xml version=\"1.0\"?><!DOCTYPE memory-map PUBLIC \"+//IDN gnu.org//DTD GDB Memory Map V1.0//EN\" \"http://sourceware.org/gdb/gdb-memory-map.dtd\"><memory-map>",
     );
     for region in &info.regions {
+        // MMIO is rejected by Session::region, so do not advertise it as RAM.
+        if region.kind == 3 {
+            continue;
+        }
         xml.push_str(&format!(
             "<memory type=\"{}\" start=\"{:#x}\" length=\"{:#x}\"/>",
             if region.kind == 2 { "rom" } else { "ram" },
