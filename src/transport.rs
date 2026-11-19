@@ -128,15 +128,29 @@ impl Transport for UsbCdc {
                 }
             }
             let time = deadline.saturating_duration_since(Instant::now());
-            if time.is_zero() && tried {
-                return Ok(None);
+            if time.is_zero() {
+                if tried {
+                    return Ok(None);
+                }
+                let Some(port) = self.port.as_mut() else {
+                    return Ok(None);
+                };
+                // Check availability without passing Duration::ZERO to set_timeout,
+                // which on Windows can make ReadFile return Ok(0) (EOF).
+                if port.bytes_to_read()? == 0 {
+                    return Ok(None);
+                }
             }
             tried = true;
             let port = self
                 .port
                 .as_mut()
                 .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))?;
-            port.set_timeout(time)?;
+            port.set_timeout(if time.is_zero() {
+                Duration::from_millis(1)
+            } else {
+                time
+            })?;
             let mut buf = [0; 512];
             match port.read(&mut buf) {
                 Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
