@@ -90,8 +90,8 @@ fn parse_response(packet: &[u8], nonce: u64, round_trip: Duration) -> io::Result
     }
 
     // Half of the network delay passed after the server sent its reply.
-    let received = ntp_to_unix_ms(timestamp(packet, 32));
-    let transmitted = ntp_to_unix_ms(timestamp(packet, 40));
+    let received = ntp_to_unix_ms(timestamp(packet, 32))?;
+    let transmitted = ntp_to_unix_ms(timestamp(packet, 40))?;
     let held_ms = transmitted.saturating_sub(received);
     let delay_ms = (round_trip.as_millis() as u64).saturating_sub(held_ms);
     Ok(transmitted + delay_ms / 2)
@@ -101,13 +101,16 @@ fn timestamp(packet: &[u8], offset: usize) -> u64 {
     u64::from_be_bytes(packet[offset..offset + 8].try_into().unwrap())
 }
 
-/// Converts an NTP timestamp to Unix milliseconds; valid from 1968 to 2104.
-fn ntp_to_unix_ms(timestamp: u64) -> u64 {
+/// Converts an NTP timestamp to Unix milliseconds; valid from 1970 to 2104.
+fn ntp_to_unix_ms(timestamp: u64) -> io::Result<u64> {
     let seconds = timestamp >> 32;
     let fraction = timestamp & 0xffff_ffff;
     // Era 1 starts in 2036; small values there are after the rollover.
     let era = if seconds < 0x8000_0000 { 1 << 32 } else { 0 };
-    (seconds + era - UNIX_EPOCH_IN_NTP) * 1000 + ((fraction * 1000) >> 32)
+    let unix_seconds = (seconds + era)
+        .checked_sub(UNIX_EPOCH_IN_NTP)
+        .ok_or_else(|| invalid("timestamp before 1970"))?;
+    Ok(unix_seconds * 1000 + ((fraction * 1000) >> 32))
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -135,13 +138,15 @@ mod tests {
 
     #[test]
     fn converts_ntp_timestamps() {
-        assert_eq!(ntp_to_unix_ms(UNIX_EPOCH_IN_NTP << 32), 0);
+        assert_eq!(ntp_to_unix_ms(UNIX_EPOCH_IN_NTP << 32).unwrap(), 0);
         assert_eq!(
-            ntp_to_unix_ms((SECONDS << 32) | 0x8000_0000),
+            ntp_to_unix_ms((SECONDS << 32) | 0x8000_0000).unwrap(),
             1_790_899_200_500
         );
         // 2036-02-07 06:28:16 UTC, the first second of era 1.
-        assert_eq!(ntp_to_unix_ms(0), 2_085_978_496_000);
+        assert_eq!(ntp_to_unix_ms(0).unwrap(), 2_085_978_496_000);
+        // 1968-01-20: before the Unix epoch, must return an error rather than underflow.
+        assert!(ntp_to_unix_ms(0x8000_0000 << 32).is_err());
     }
 
     #[test]
