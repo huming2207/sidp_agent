@@ -76,7 +76,14 @@ pub fn describe_status(status: i32) -> &'static str {
             "the target is busy: a programming run, GDB, an agent session or an exclusive trap \
              has it"
         }
-        20 => "SWD error: the target didn't answer (powered? wired? asleep?)",
+        12 => {
+            "the target stopped answering (powered? wired? asleep? --connect-under-reset \
+             reaches one that sleeps or turns SWD off)"
+        }
+        20 => {
+            "SWD error: the target didn't answer (powered? wired? asleep? --connect-under-reset \
+             reaches one that sleeps or turns SWD off)"
+        }
         STATUS_NO_SESSION => "no agent session is open",
         STATUS_NO_SCRIPTS => {
             "the device can't run scripts now (no PSRAM, or they failed; see the device log)"
