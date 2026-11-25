@@ -159,7 +159,8 @@ capture, the events just before, and the data the handler returned as
   that holds the core stops the target until someone looks. Holding is right
   when you want GDB to land on the fault.
 - The module starts from the top after a probe restart, after the target
-  stopped answering, and after it yielded to GDB or a programming run. Keep
+  stopped answering, after it yielded to GDB or a programming run, and when
+  its top level throws (five failures in a row and the trap gives up). Keep
   what it remembers small and rebuildable; put history in the handler's
   `data`, where the incident keeps it.
 - In `yield` mode (default) GDB attaching or a programming run pauses the
