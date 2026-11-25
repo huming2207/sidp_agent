@@ -207,9 +207,9 @@ impl Capture {
                 .ok_or_else(|| bad("capture: section past the end"))?;
             match ty {
                 SEC_REGS => {
-                    for e in body.chunks_exact(8) {
-                        c.regs
-                            .insert(e[0], (e[1] != 0).then(|| u32_at(e, 4).unwrap()));
+                    for e in body.as_chunks::<8>().0 {
+                        let value = u32::from_le_bytes([e[4], e[5], e[6], e[7]]);
+                        c.regs.insert(e[0], (e[1] != 0).then_some(value));
                     }
                 }
                 SEC_FAULT if body.len() >= 32 => {
