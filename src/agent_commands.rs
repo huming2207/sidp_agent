@@ -228,6 +228,12 @@ pub struct TrapOptions {
     /// Incidents recorded per hour; more are only counted. 0 for the device's default.
     #[arg(long, default_value_t = 0)]
     incidents_per_hour: u32,
+    /// How long a throttled watch (more than 10 firings a second) holds the
+    /// target before the trap lets it run, and how long a target found halted
+    /// when the trap starts stays halted: seconds, or `forever` to hold it
+    /// until someone resumes it. Default: the device's (10 s).
+    #[arg(long, value_name = "SECONDS|forever", value_parser = throttle_hold)]
+    throttle_hold: Option<u32>,
     /// Let the module write target memory and core registers, and call target functions.
     #[arg(long)]
     allow_write: bool,
@@ -249,6 +255,21 @@ pub enum TrapModeArg {
     Yield,
     /// GDB and programming runs are refused while the trap is armed.
     Exclusive,
+}
+
+/// `--throttle-hold` in milliseconds for TrapConfig.throttle_hold_ms.
+fn throttle_hold(s: &str) -> Result<u32, String> {
+    if s == "forever" {
+        return Ok(agent::THROTTLE_HOLD_FOREVER);
+    }
+    let secs: f64 = s
+        .parse()
+        .map_err(|_| "seconds (e.g. 10 or 0.5) or `forever`".to_owned())?;
+    let ms = (secs * 1000.0).round();
+    if !(1.0..=86_400_000.0).contains(&ms) {
+        return Err("between 0.001 and 86400 seconds, or `forever`".into());
+    }
+    Ok(ms as u32)
 }
 
 fn trap_name(s: &str) -> Result<String, String> {
@@ -276,6 +297,7 @@ impl TrapOptions {
             ),
             connect_under_reset: self.connect_under_reset,
             incidents_per_hour: self.incidents_per_hour,
+            throttle_hold_ms: self.throttle_hold.unwrap_or(0),
         }
     }
 }

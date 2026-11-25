@@ -74,7 +74,9 @@ with the event. If the core is held, the handler's return value decides:
 the handler throws or takes longer than `handlerTimeoutMs`). Every firing is
 also a `watch` event, so you see it even without a handler. A watch firing
 more than 10 times a second is throttled: the core is held and the handler
-isn't called.
+isn't called. In a session it stays held until you resume it; in a trap it
+runs again after `throttle_hold_ms` (default 10 s), and so does a core the
+trap finds halted by a halt request when it starts.
 
 Halts your own calls cause (`target.halt()`) don't fire watches. A core found already
 stopped by a fault, breakpoint or watchpoint when the session starts (the

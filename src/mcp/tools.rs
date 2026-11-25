@@ -259,6 +259,12 @@ const TOOLS: &[Tool] = &[
                                               which restarts after. exclusive: they are refused while it is armed." },
                     "incidents_per_hour": { "type": "integer", "minimum": 0, "maximum": 3600,
                                             "description": "More are only counted; 0 for the probe's default." },
+                    "throttle_hold_ms": { "anyOf": [
+                                              { "type": "integer", "minimum": 0, "maximum": 86_400_000 },
+                                              { "const": "forever" } ],
+                                          "description": "How long a throttled watch (over 10 firings a second) \
+                                                          holds the target before the trap lets it run; 0 for the \
+                                                          probe's default (10 s), \"forever\" until resumed." },
                     "name": { "type": "string", "description": "File name in stack traces (default trap.js)." },
                     "timeout_ms": wait_arg("the top level"),
                 },
@@ -990,6 +996,15 @@ impl Device {
                 .map(|n| n as u32)
                 .ok_or("incidents_per_hour must be 0-3600")
         })?;
+        let throttle_hold_ms = match args.get("throttle_hold_ms") {
+            None => 0,
+            Some(Value::String(s)) if s == "forever" => agent::THROTTLE_HOLD_FOREVER,
+            Some(v) => v
+                .as_u64()
+                .filter(|&n| n <= 86_400_000)
+                .map(|n| n as u32)
+                .ok_or("throttle_hold_ms must be 0-86400000 or \"forever\"")?,
+        };
         let name = args["name"].as_str().unwrap_or("trap.js");
         let blob = sidp_qjsc::compile_container(source, name, Strip::None)
             .map_err(|e| format!("doesn't compile: {e}"))?;
@@ -1005,6 +1020,7 @@ impl Device {
             permissions: Some(self.options.allow.into()),
             connect_under_reset: self.options.connect_under_reset,
             incidents_per_hour: per_hour,
+            throttle_hold_ms,
         };
         let status = self.with_connection(|c| c.trap_arm(config, &blob, wait))?;
         let first = self.script_result(status.first_result.clone().unwrap_or_default());
