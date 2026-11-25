@@ -76,7 +76,11 @@ also a `watch` event, so you see it even without a handler. A watch firing
 more than 10 times a second is throttled: the core is held and the handler
 isn't called.
 
-Halts your own calls cause (`target.halt()`) don't fire watches.
+Halts your own calls cause (`target.halt()`) don't fire watches. A core found already
+stopped by a fault, breakpoint or watchpoint when the session starts (the
+cause is still in DFSR) fires the matching watch, or a `stop` event, once
+your first script's top level is done; one halted by a debugger's halt
+request doesn't.
 
 ## Events
 
