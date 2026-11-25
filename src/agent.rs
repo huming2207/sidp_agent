@@ -73,7 +73,8 @@ pub fn describe_status(status: i32) -> &'static str {
         2 => "the device refused the request (bad argument, or a capture that is gone)",
         3 => "this firmware has no agent sessions",
         4 => {
-            "the target is busy: GDB is attached, a job is running, or another agent session is open"
+            "the target is busy: a programming run, GDB, an agent session or an exclusive trap \
+             has it"
         }
         20 => "SWD error: the target didn't answer (powered? wired? asleep?)",
         STATUS_NO_SESSION => "no agent session is open",
