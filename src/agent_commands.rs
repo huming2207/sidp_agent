@@ -20,7 +20,7 @@ pub enum SessionEndArg {
     Asis,
     /// The target runs.
     Resume,
-    /// The target is reset and runs.
+    /// The target is reset and runs, with debug off. Implies --allow-reset.
     Reset,
 }
 
@@ -50,7 +50,8 @@ impl AgentOptions {
         Allow {
             write: self.allow_write,
             flash: self.allow_flash,
-            reset: self.allow_reset,
+            // Whoever chose a reset at the end accepts resets during the session too.
+            reset: self.allow_reset || matches!(self.session_end, SessionEndArg::Reset),
         }
     }
 
