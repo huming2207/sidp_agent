@@ -19,7 +19,7 @@ interface SyncOptions {
 interface TargetError extends Error {
     code:
         | 'NOT_ALLOWED'  // needs a permission this session doesn't have (agent.permissions())
-        | 'BUSY'         // a sync call while a promise call is pending, >4 promise calls,
+        | 'BUSY'         // a sync call while call(), reset(), reinit() or flash.* is pending, >4 promise calls,
                          // a second buffer call (readMem, writeMem, flash.*) before the first ended,
                          // or a second watch of the same kind
         | 'TIMEOUT'

@@ -49,8 +49,10 @@ few and drop them when done.
 
 Sync calls (`read32`, `readMem`, `halt`...) block the script until the probe
 answers. Promise calls (`delay`, `poll32`, `waitHalt`, `call`, `flash.*`) let
-it do other things; at most four at once, and no sync call while one is
-pending (`BUSY`).
+it do other things; at most four at once. Sync calls work while `delay`,
+`poll32` or `waitHalt` is pending (a watch handler can read memory while
+your loop waits), but not while `call`, `reset`, `reinit` or `flash.*` is
+(`BUSY`).
 
 ## Watches
 
