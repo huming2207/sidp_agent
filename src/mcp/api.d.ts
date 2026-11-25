@@ -7,7 +7,9 @@
 // There are no timers (setTimeout/setInterval), no fetch, no files: wait with
 // `await target.delay(ms)` or `target.poll32(...)`.
 
-type Bytes = Uint8Array | ArrayBuffer | number[];
+// Plain arrays are refused (TypeError): a number per byte costs the probe far
+// more RAM. Write `new Uint8Array([0x01, 0x02])`.
+type Bytes = Uint8Array | ArrayBuffer;
 
 /** Sync calls block the script until the probe answers. */
 interface SyncOptions {
