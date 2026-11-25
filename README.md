@@ -131,7 +131,7 @@ sidp-agent agent eval --port /dev/ttyACM0 "target.read32(0xE000ED00).toString(16
 sidp-agent agent run --port /dev/ttyACM0 watch-faults.js --seconds 60 --elf build/app.elf
 ```
 
-`agent run` prints the session's events as JSON lines.
+`agent run` prints the session's events as JSON lines, and `{"kind":"missed","count":N}` when the device overwrote N events before they were read (it keeps the last 64).
 
 For bugs that take days, a trap keeps a module running on the device with no
 computer attached and records incidents to its flash (MCP: `arm_trap`,

@@ -174,12 +174,23 @@ pub fn run(
     let blob = sidp_qjsc::compile_container(&source, name, script::Strip::None)?;
     let mut session = open(connection, options)?;
     let mut after = session.agent_info()?.newest_event_seq;
-    print_result(&session.script_run(&blob, Duration::from_secs(5))?)?;
+    // Events aren't read while this waits, and the device keeps only the last
+    // 64: a module that logs from its first line loses them after a few
+    // seconds. One second holds a full console/emit burst (40) plus a second
+    // of the steady rate; a later outcome comes as a `result` event.
+    print_result(&session.script_run(&blob, Duration::from_secs(1))?)?;
     let end = (seconds > 0.0).then(|| Instant::now() + Duration::from_secs_f64(seconds));
     while end.is_none_or(|end| Instant::now() < end) {
         let read = session.event_read(after)?;
         let more = read.events.last().is_some_and(|e| e.seq < read.newest_seq);
         for e in read.events {
+            let missed = e.seq.saturating_sub(after.saturating_add(1));
+            if missed > 0 {
+                println!(
+                    "{}",
+                    serde_json::json!({ "kind": "missed", "count": missed })
+                );
+            }
             after = e.seq;
             let mut data: serde_json::Value =
                 serde_json::from_str(&e.json).unwrap_or(serde_json::Value::String(e.json));
