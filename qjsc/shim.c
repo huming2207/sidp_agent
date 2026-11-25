@@ -47,9 +47,10 @@ const char *sidp_qjsc_version(void)
     return JS_GetVersion();
 }
 
-/* src[len] must be 0. On success *out is malloc'd bytecode, else *err a malloc'd message. */
-int sidp_qjsc_compile(const char *src, size_t len, const char *name, int strip, uint8_t **out, size_t *out_len,
-                      char **err)
+/* src[len] must be 0. On success *out is malloc'd bytecode, else *err a malloc'd message.
+ * script: an async global script (qjsc-esp -e) instead of a module. */
+int sidp_qjsc_compile(const char *src, size_t len, const char *name, int strip, int script, uint8_t **out,
+                      size_t *out_len, char **err)
 {
     *out = NULL;
     *err = NULL;
@@ -62,7 +63,8 @@ int sidp_qjsc_compile(const char *src, size_t len, const char *name, int strip, 
         return -1;
     }
     JS_SetModuleLoaderFunc(rt, NULL, loader, NULL);
-    JSValue fn = JS_Eval(ctx, src, len, name, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+    int type = script ? JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC : JS_EVAL_TYPE_MODULE;
+    JSValue fn = JS_Eval(ctx, src, len, name, type | JS_EVAL_FLAG_COMPILE_ONLY);
     int ret = -1;
     if (JS_IsException(fn)) {
         *err = dup_error(ctx);

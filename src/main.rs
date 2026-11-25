@@ -1,5 +1,6 @@
 //! Command-line USB SIDP to local GDB bridge and Soul Injector job manager.
 //! See `sidp-agent --help`.
+mod agent_commands;
 mod commands;
 mod network_commands;
 mod power_commands;
@@ -8,7 +9,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use commands::{Connection, DeviceSession, JobSource};
 use sidp_agent::{
     listener::{Event, Listener},
-    manage, power,
+    power,
     session::{self, ResetKind},
 };
 use std::{
@@ -116,6 +117,54 @@ enum Command {
     Network {
         #[command(subcommand)]
         command: NetworkCommand,
+    },
+    /// Serve an LLM agent over MCP (stdio): it runs JavaScript on the device
+    /// that observes and drives the target. Observing, halting and resuming
+    /// are allowed; writes, flash and reset need the --allow-* flags.
+    Mcp {
+        #[command(flatten)]
+        connection: Connection,
+        #[command(flatten)]
+        options: agent_commands::AgentOptions,
+        /// The target firmware's ELF, to name code addresses.
+        #[arg(long)]
+        elf: Option<PathBuf>,
+    },
+    /// Run JavaScript on the device against the target, as an agent session does.
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentCommand {
+    /// Evaluate a script and print its value as JSON.
+    Eval {
+        #[command(flatten)]
+        connection: Connection,
+        #[command(flatten)]
+        options: agent_commands::AgentOptions,
+        /// JavaScript; top-level await works.
+        code: String,
+        /// How long to wait for the value.
+        #[arg(long, default_value_t = 5000, value_parser = clap::value_parser!(u64).range(1..=60000))]
+        timeout_ms: u64,
+    },
+    /// Run an ES module, then print the session's events as JSON lines.
+    Run {
+        #[command(flatten)]
+        connection: Connection,
+        #[command(flatten)]
+        options: agent_commands::AgentOptions,
+        /// The module; bundle local imports into it.
+        file: PathBuf,
+        /// How long to print events; 0 until stopped.
+        #[arg(long, default_value_t = 0.0)]
+        seconds: f64,
+        /// The target firmware's ELF, to name code addresses.
+        #[arg(long)]
+        elf: Option<PathBuf>,
     },
 }
 
@@ -298,7 +347,7 @@ fn main() -> ExitCode {
         Some(session::Error::Status(status)) => {
             eprintln!(
                 "error: {} (status {status})",
-                manage::describe_status(*status)
+                sidp_agent::agent::describe_status(*status)
             );
         }
         _ => eprintln!("error: {error}"),
@@ -377,6 +426,26 @@ fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 network_commands::Secret::new(new_password, keep_password),
             ),
             NetworkCommand::Off { connection } => network_commands::off(&connection),
+        },
+        Command::Mcp {
+            connection,
+            options,
+            elf,
+        } => agent_commands::mcp(&connection, &options, elf.as_deref()),
+        Command::Agent { command } => match command {
+            AgentCommand::Eval {
+                connection,
+                options,
+                code,
+                timeout_ms,
+            } => agent_commands::eval(&connection, &options, &code, timeout_ms),
+            AgentCommand::Run {
+                connection,
+                options,
+                file,
+                seconds,
+                elf,
+            } => agent_commands::run(&connection, &options, &file, seconds, elf.as_deref()),
         },
     }
 }

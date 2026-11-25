@@ -33,7 +33,7 @@ const NTP_TIMEOUT: Duration = Duration::from_secs(2);
 const DEVICE_WAIT: Duration = Duration::from_secs(30);
 
 /// Connection options shared by every device command.
-#[derive(Args)]
+#[derive(Args, Clone)]
 pub struct Connection {
     /// USB CDC path, e.g. /dev/ttyACM0 or COM3. Over WiFi:
     /// ws://127.0.0.1/DEVICE_ID uses a device held by `sidp-agent serve` or
@@ -62,6 +62,13 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// Whether [`Connection::open`] would ask for the device password on stdin.
+    pub fn would_ask_password(&self) -> bool {
+        self.port.starts_with("ws://")
+            && self.password.is_none()
+            && std::env::var_os("SIDP_PASSWORD").is_none()
+    }
+
     /// Opens a fresh SIDP connection, and logs in over the network.
     pub fn open(&self) -> Result<DeviceSession, Box<dyn Error>> {
         let timeout = Duration::from_millis(self.timeout_ms);

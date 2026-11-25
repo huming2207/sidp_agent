@@ -41,6 +41,7 @@ pub const CAP_STEP: u32 = 1 << 5;
 /// Optional Cortex-M4 FPU capability.
 pub const CAP_FPU: u32 = 1 << 9;
 
+mod agent_service;
 mod control;
 mod exchange;
 mod management;
@@ -68,6 +69,7 @@ pub struct Session<T: Transport> {
     requests: u64,
     power_sink: Option<PowerSink>,
     flash_cache: bool,
+    agent_notice: Option<u32>,
 }
 impl<T: Transport> Session<T> {
     /// Create an unattached session on a fresh physical connection.
@@ -85,6 +87,7 @@ impl<T: Transport> Session<T> {
             requests: 0,
             power_sink: None,
             flash_cache: false,
+            agent_notice: None,
         }
     }
     /// Hands power data that arrives from now on to `sink`, while requests

@@ -44,11 +44,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: huming2207/sidp_client
-          ref: e78efbd50b5e918aac28bf47a2cfa55c9e777780
+          ref: 3c07891c2a826b937db4a47653659b2652d611a9
           path: sidp-client-fixture
       - name: Check schema copies match sidp_client
         run: |
-          for file in job.proto job.options manage.proto manage.options power.proto power.options; do
+          for file in job.proto job.options manage.proto manage.options power.proto power.options agent.proto agent.options; do
             diff "proto/$file" "sidp-client-fixture/proto/$file"
           done
       - name: Install host tools

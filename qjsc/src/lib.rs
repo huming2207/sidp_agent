@@ -15,6 +15,7 @@ unsafe extern "C" {
         len: usize,
         name: *const c_char,
         strip: c_int,
+        script: c_int,
         out: *mut *mut u8,
         out_len: *mut usize,
         err: *mut *mut c_char,
@@ -67,6 +68,18 @@ pub fn version() -> &'static str {
 /// (`si:target`, `qjs:os`...) are left to the device; any other import is an
 /// error, since local files must be bundled into the module first.
 pub fn compile(source: &str, name: &str, strip: Strip) -> Result<Vec<u8>, Error> {
+    compile_as(source, name, strip, false)
+}
+
+/// Compiles a global script that may use top-level `await` to raw bytecode,
+/// for an agent session's eval: its value is that of the last statement, and
+/// its `var`s and functions stay in the session's globals. Same as
+/// `qjs_esp_bc.py compile --script`.
+pub fn compile_eval(source: &str, name: &str, strip: Strip) -> Result<Vec<u8>, Error> {
+    compile_as(source, name, strip, true)
+}
+
+fn compile_as(source: &str, name: &str, strip: Strip, script: bool) -> Result<Vec<u8>, Error> {
     let name = CString::new(name).map_err(|_| Error("script name contains NUL".into()))?;
     let mut text = Vec::with_capacity(source.len() + 1);
     text.extend_from_slice(source.as_bytes());
@@ -87,6 +100,7 @@ pub fn compile(source: &str, name: &str, strip: Strip) -> Result<Vec<u8>, Error>
             source.len(),
             name.as_ptr(),
             strip,
+            script as c_int,
             &mut out,
             &mut out_len,
             &mut err,
@@ -124,6 +138,11 @@ pub fn container(bytecode: &[u8]) -> Vec<u8> {
 /// Compiles a module straight to a container.
 pub fn compile_container(source: &str, name: &str, strip: Strip) -> Result<Vec<u8>, Error> {
     compile(source, name, strip).map(|bc| container(&bc))
+}
+
+/// Compiles an eval script straight to a container.
+pub fn compile_eval_container(source: &str, name: &str, strip: Strip) -> Result<Vec<u8>, Error> {
+    compile_eval(source, name, strip).map(|bc| container(&bc))
 }
 
 /// Whether `data` is a bytecode container rather than JavaScript source.
@@ -179,6 +198,17 @@ mod tests {
         let source = compile(src, "s.js", Strip::Source).unwrap().len();
         let debug = compile(src, "s.js", Strip::Debug).unwrap().len();
         assert!(none > source && source > debug, "{none} {source} {debug}");
+    }
+
+    #[test]
+    fn eval_scripts_await_at_the_top_and_cannot_export() {
+        assert!(compile_eval("await 1;\nvar x = 2;\nx\n", "e.js", Strip::Source).is_ok());
+        let err = compile_eval("export const x = 1;\n", "e.js", Strip::Source).unwrap_err();
+        assert!(err.0.contains("SyntaxError"), "{err}");
+        assert_ne!(
+            compile_eval("1\n", "e.js", Strip::None).unwrap(),
+            compile("1\n", "e.js", Strip::None).unwrap()
+        );
     }
 
     #[test]

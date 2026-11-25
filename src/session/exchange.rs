@@ -43,6 +43,14 @@ impl<T: Transport> Session<T> {
                 }
                 Ok(())
             }
+            (codec::LOG, crate::agent::AGENT_EVENT, 0) => {
+                let Ok(notice) = crate::agent::proto::EventNotify::decode(frame.payload.as_slice())
+                else {
+                    return self.wire_error(invalid("malformed AGENT_EVENT"));
+                };
+                self.agent_notice = Some(self.agent_notice.unwrap_or(0).max(notice.newest_seq));
+                Ok(())
+            }
             (codec::EVENT, power::POWER_STOPPED, 0) => {
                 let Ok(stopped) = power::Stopped::decode(frame.payload.as_slice()) else {
                     return self.wire_error(invalid("malformed POWER_STOPPED"));
@@ -56,6 +64,15 @@ impl<T: Transport> Session<T> {
         }
     }
     pub(super) fn request(&mut self, opcode: u16, payload: Vec<u8>) -> Result<Vec<u8>> {
+        self.request_within(opcode, payload, self.timeout)
+    }
+    /// A request the device may take longer than the usual timeout to answer.
+    pub(super) fn request_within(
+        &mut self,
+        opcode: u16,
+        payload: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
         if self.closed {
             return Err(Error::State("connection closed; reopen and attach"));
         }
@@ -65,7 +82,7 @@ impl<T: Transport> Session<T> {
             return Err(Error::State("request IDs exhausted; reconnect"));
         }
         self.next_id += 1;
-        let deadline = Instant::now() + self.timeout;
+        let deadline = Instant::now() + timeout;
         let frame = Frame {
             kind: codec::REQUEST,
             opcode,

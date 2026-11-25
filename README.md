@@ -103,6 +103,36 @@ and remake `qjsc/tests/fixtures/*.qbc` with `qjs_esp_bc.py`.
 
 `compile --script` writes the compiled script next to the job file.
 
+## Agent sessions (MCP)
+
+`sidp-agent mcp` is an MCP server on stdio that lets an LLM agent watch and
+drive a Cortex-M target: it compiles the agent's JavaScript (an eval or an ES
+module) and runs it on the device, which keeps watches on the target (faults,
+halts, lockups, resets), applies a reflex at once and keeps snapshots for the
+agent to read. Soul Injector's `docs/en/agent-sessions.md` explains it for
+users and sidp_client's `docs/sidp-agent.md` the protocol.
+
+```sh
+claude mcp add soul-injector -- sidp-agent mcp --port /dev/ttyACM0 \
+    [--allow-write] [--allow-flash] [--allow-reset] \
+    [--session-end asis|resume|reset] [--elf build/app.elf]
+```
+
+Observing, halting and resuming are always allowed; writes, flash and reset
+need the flags, and the device enforces them. The agent reads `si://guide`
+and `si://api.d.ts` (`src/mcp/guide.md`, `src/mcp/api.d.ts`) and calls the
+tools in `src/mcp/tools.rs`. Eval scripts are compiled with
+`sidp_qjsc::compile_eval`, a global script with top-level await.
+
+For trying scripts by hand:
+
+```sh
+sidp-agent agent eval --port /dev/ttyACM0 "target.read32(0xE000ED00).toString(16)"
+sidp-agent agent run --port /dev/ttyACM0 watch-faults.js --seconds 60 --elf build/app.elf
+```
+
+`agent run` prints the session's events as JSON lines.
+
 ## Production log
 
 The device records every run and every boot until the log is collected:
