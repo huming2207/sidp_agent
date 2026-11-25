@@ -135,6 +135,67 @@ enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    /// Leave a module watching the target on the device, with no computer
+    /// attached, through disconnects and restarts; it records incidents.
+    Trap {
+        #[command(subcommand)]
+        command: TrapCommand,
+    },
+    /// The incidents traps recorded on the device.
+    Incident {
+        #[command(subcommand)]
+        command: IncidentCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum TrapCommand {
+    /// Arm an ES module as the device's trap, replacing the armed one.
+    Arm {
+        #[command(flatten)]
+        connection: Connection,
+        #[command(flatten)]
+        options: agent_commands::TrapOptions,
+        /// The module; bundle local imports into it.
+        file: PathBuf,
+    },
+    /// Show the trap's state.
+    Status {
+        #[command(flatten)]
+        connection: Connection,
+    },
+    /// Disarm the trap; the target is left as it is.
+    Disarm {
+        #[command(flatten)]
+        connection: Connection,
+    },
+}
+
+#[derive(Subcommand)]
+enum IncidentCommand {
+    /// List the incidents on the device.
+    List {
+        #[command(flatten)]
+        connection: Connection,
+    },
+    /// Print an incident as JSON.
+    Show {
+        #[command(flatten)]
+        connection: Connection,
+        id: u32,
+        /// The target firmware's ELF, to name code addresses.
+        #[arg(long)]
+        elf: Option<PathBuf>,
+    },
+    /// Delete an incident, or all of them.
+    Rm {
+        #[command(flatten)]
+        connection: Connection,
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        id: Option<u32>,
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -446,6 +507,28 @@ fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 seconds,
                 elf,
             } => agent_commands::run(&connection, &options, &file, seconds, elf.as_deref()),
+        },
+        Command::Trap { command } => match command {
+            TrapCommand::Arm {
+                connection,
+                options,
+                file,
+            } => agent_commands::trap_arm(&connection, &options, &file),
+            TrapCommand::Status { connection } => agent_commands::trap_status(&connection),
+            TrapCommand::Disarm { connection } => agent_commands::trap_disarm(&connection),
+        },
+        Command::Incident { command } => match command {
+            IncidentCommand::List { connection } => agent_commands::incident_list(&connection),
+            IncidentCommand::Show {
+                connection,
+                id,
+                elf,
+            } => agent_commands::incident_show(&connection, id, elf.as_deref()),
+            IncidentCommand::Rm {
+                connection,
+                id,
+                all: _,
+            } => agent_commands::incident_rm(&connection, id.unwrap_or(0)),
         },
     }
 }

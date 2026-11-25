@@ -15,8 +15,9 @@ pub mod proto {
 }
 
 pub use proto::{
-    CaptureReadResponse, Event, EventReadResponse, OpenRequest, Permissions, ScriptResult,
-    SessionEnd, SessionInfo, script_result::Outcome,
+    CaptureReadResponse, Event, EventReadResponse, IncidentInfo, IncidentListResponse, OpenRequest,
+    Permissions, ScriptResult, SessionEnd, SessionInfo, TrapConfig, TrapMode, TrapState,
+    TrapStatus, script_result::Outcome,
 };
 
 /// AGENT_OPEN opcode.
@@ -37,6 +38,18 @@ pub const SCRIPT_UPLOAD: u16 = 0x0313;
 pub const EVENT_READ: u16 = 0x0320;
 /// CAPTURE_READ opcode.
 pub const CAPTURE_READ: u16 = 0x0321;
+/// TRAP_ARM opcode.
+pub const TRAP_ARM: u16 = 0x0330;
+/// TRAP_DISARM opcode.
+pub const TRAP_DISARM: u16 = 0x0331;
+/// TRAP_STATUS opcode.
+pub const TRAP_STATUS: u16 = 0x0332;
+/// INCIDENT_LIST opcode.
+pub const INCIDENT_LIST: u16 = 0x0340;
+/// INCIDENT_READ opcode.
+pub const INCIDENT_READ: u16 = 0x0341;
+/// INCIDENT_DELETE opcode.
+pub const INCIDENT_DELETE: u16 = 0x0342;
 /// AGENT_EVENT log-stream opcode: new events are ready.
 pub const AGENT_EVENT: u16 = 0x0380;
 
@@ -46,6 +59,8 @@ pub const STATUS_NO_SESSION: i32 = 40;
 pub const STATUS_NO_SCRIPTS: i32 = 41;
 /// Status of AGENT_OPEN when the device's job isn't a Cortex-M one.
 pub const STATUS_NEEDS_CORTEX_M: i32 = 42;
+/// Status of AGENT_OPEN (and of runs, for an exclusive trap) while a trap is armed.
+pub const STATUS_TRAP_ARMED: i32 = 43;
 
 /// Largest bytecode container sent inline (nanopb max_size); bigger ones go by SCRIPT_UPLOAD.
 pub const MAX_INLINE: usize = 7936;
@@ -67,6 +82,10 @@ pub fn describe_status(status: i32) -> &'static str {
         }
         STATUS_NEEDS_CORTEX_M => {
             "the device needs a Cortex-M job to know the target: push one with `sidp-agent job push`"
+        }
+        STATUS_TRAP_ARMED => {
+            "a trap is armed on the device and has the target; its status, events and incidents \
+             can be read, and disarming it frees the target"
         }
         _ => crate::manage::describe_status(status),
     }
@@ -91,6 +110,197 @@ impl From<Allow> for Permissions {
             reset: a.reset,
         }
     }
+}
+
+/// A trap's record of a watch firing or an `agent.incident()` call, as
+/// INCIDENT_READ returns it (sidp_client's docs/sidp-agent.md, "Incidents").
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Incident {
+    /// Incident ID.
+    pub id: u32,
+    /// 0 a watch fired, 1 `agent.incident()`.
+    pub kind: u8,
+    /// The watch's ID, for a watch.
+    pub watch: u16,
+    /// Device boot count when it was recorded.
+    pub boot: u32,
+    /// Device uptime when it was recorded.
+    pub uptime_us: u64,
+    /// UTC in ms, 0 when the device didn't know the time.
+    pub utc_ms: u64,
+    /// The watch's or the incident's name.
+    pub name: String,
+    /// The trap's name.
+    pub trap: String,
+    /// What happened.
+    pub cause: Option<Value>,
+    /// What the handler or `agent.incident()` attached.
+    pub data: Option<Value>,
+    /// What the watch did in the end, and how its handler went.
+    pub outcome: Option<Value>,
+    /// The newest events before it.
+    pub events: Option<Value>,
+    /// The watch's capture.
+    pub capture: Option<Capture>,
+}
+
+const INC_CAUSE: u8 = 1;
+const INC_DATA: u8 = 2;
+const INC_OUTCOME: u8 = 3;
+const INC_EVENTS: u8 = 4;
+const INC_CAPTURE: u8 = 5;
+const INCIDENT_HEADER: usize = 96;
+
+fn c_str(b: &[u8]) -> String {
+    let end = b.iter().position(|&x| x == 0).unwrap_or(b.len());
+    String::from_utf8_lossy(&b[..end]).into_owned()
+}
+
+fn json_or_text(b: &[u8]) -> Value {
+    serde_json::from_slice(b)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(b).into_owned()))
+}
+
+impl Incident {
+    /// Reads an incident file.
+    pub fn parse(b: &[u8]) -> io::Result<Self> {
+        let bad = crate::codec::invalid;
+        if b.len() < INCIDENT_HEADER || &b[..4] != b"SIIN" || b[4] != 1 {
+            return Err(bad("incident: not a version 1 incident"));
+        }
+        if u32_at(b, 12)? as usize != b.len() {
+            return Err(bad("incident: length mismatch"));
+        }
+        let u64_at = |at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
+        let mut inc = Incident {
+            kind: b[5],
+            watch: u16::from_le_bytes([b[6], b[7]]),
+            id: u32_at(b, 8)?,
+            boot: u32_at(b, 16)?,
+            uptime_us: u64_at(24),
+            utc_ms: u64_at(32),
+            name: c_str(&b[40..64]),
+            trap: c_str(&b[64..88]),
+            ..Default::default()
+        };
+        let mut at = INCIDENT_HEADER;
+        while at < b.len() {
+            let ty = *b.get(at).ok_or_else(|| bad("incident: truncated"))?;
+            let len = u32_at(b, at + 4)? as usize;
+            let start = at + 8;
+            let body = start
+                .checked_add(len)
+                .and_then(|end| b.get(start..end))
+                .ok_or_else(|| bad("incident: section past the end"))?;
+            match ty {
+                INC_CAUSE => inc.cause = Some(json_or_text(body)),
+                INC_DATA => inc.data = Some(json_or_text(body)),
+                INC_OUTCOME => inc.outcome = Some(json_or_text(body)),
+                INC_EVENTS => inc.events = Some(json_or_text(body)),
+                INC_CAPTURE => inc.capture = Some(Capture::parse(body)?),
+                _ => {}
+            }
+            at = start + len.div_ceil(4) * 4;
+        }
+        Ok(inc)
+    }
+
+    /// The incident as JSON for an agent; `symbols` names code addresses.
+    pub fn to_json(&self, symbols: Option<&Symbols>) -> Value {
+        let mut out = json!({
+            "id": self.id,
+            "kind": if self.kind == 0 { "watch" } else { "script" },
+            "name": self.name,
+            "trap": self.trap,
+            "boot": self.boot,
+            "uptime_s": self.uptime_us as f64 / 1e6,
+            "utc": (self.utc_ms != 0).then(|| utc_text(self.utc_ms)),
+        });
+        for (key, v) in [
+            ("cause", &self.cause),
+            ("data", &self.data),
+            ("outcome", &self.outcome),
+            ("events_before", &self.events),
+        ] {
+            if let Some(v) = v {
+                out[key] = v.clone();
+            }
+        }
+        if let (Some(syms), Some(pc)) = (symbols, out["cause"]["pc"].as_str())
+            && let Ok(pc) = u32::from_str_radix(pc.trim_start_matches("0x"), 16)
+            && let Some(name) = syms.describe(pc)
+        {
+            out["cause"]["pc_symbol"] = name.into();
+        }
+        if let Some(c) = &self.capture {
+            out["capture"] = c.to_json(symbols);
+        }
+        out
+    }
+}
+
+/// `ms` since the Unix epoch as ISO 8601 UTC, like 2026-11-25T08:30:00.250Z.
+pub fn utc_text(ms: u64) -> String {
+    let days = (ms / 86_400_000) as i64;
+    let rem = ms % 86_400_000;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+        rem / 3_600_000,
+        rem / 60_000 % 60,
+        rem / 1000 % 60,
+        rem % 1000
+    )
+}
+
+/// A trap's state as text.
+pub fn trap_state_name(state: i32) -> &'static str {
+    match TrapState::try_from(state) {
+        Ok(TrapState::Disarmed) => "disarmed",
+        Ok(TrapState::Running) => "running",
+        Ok(TrapState::Waiting) => "waiting",
+        Ok(TrapState::Paused) => "paused",
+        Ok(TrapState::Failed) => "failed",
+        Err(_) => "unknown",
+    }
+}
+
+/// TRAP_STATUS as JSON.
+pub fn trap_status_json(st: &TrapStatus) -> Value {
+    let mut out = json!({
+        "armed": st.config.is_some(),
+        "incidents_on_device": st.incidents,
+        "newest_incident": st.newest_incident,
+        "newest_event_seq": st.newest_event_seq,
+    });
+    if let Some(cfg) = &st.config {
+        let perms = cfg.permissions.unwrap_or_default();
+        out["name"] = cfg.name.clone().into();
+        out["mode"] = match TrapMode::try_from(cfg.mode) {
+            Ok(TrapMode::Exclusive) => "exclusive",
+            _ => "yield",
+        }
+        .into();
+        out["state"] = trap_state_name(st.state).into();
+        if !st.note.is_empty() {
+            out["note"] = st.note.clone().into();
+        }
+        out["permissions"] =
+            json!({ "write": perms.write, "flash": perms.flash, "reset": perms.reset });
+        out["incidents_per_hour"] = cfg.incidents_per_hour.into();
+        out["starts_this_boot"] = st.starts.into();
+        out["incidents_suppressed"] = st.suppressed.into();
+        out["module_sha256"] = to_hex(&st.module_sha256).into();
+    }
+    out
 }
 
 /// Name of a watch kind in captures and events.
@@ -638,6 +848,13 @@ mod tests {
         assert_eq!(bits, ["PRECISERR", "BFARVALID"]);
         assert_eq!(j["fault"]["hfsr_bits"][0]["bit"], "FORCED");
         assert!(j["fault"].get("bfar").is_none()); // its read failed
+    }
+
+    #[test]
+    fn utc_text_formats_dates() {
+        assert_eq!(utc_text(0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(utc_text(1_709_164_800_000), "2024-02-29T00:00:00.000Z");
+        assert_eq!(utc_text(4_102_444_799_999), "2099-12-31T23:59:59.999Z");
     }
 
     #[test]

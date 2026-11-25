@@ -5,7 +5,10 @@
 //! runtime, watches and captures are gone.
 use super::Cancel;
 use crate::{
-    agent::{self, Allow, Capture, Outcome, ScriptResult, SessionEnd, SessionInfo, Symbols},
+    agent::{
+        self, Allow, Capture, Incident, Outcome, ScriptResult, SessionEnd, SessionInfo, Symbols,
+        TrapConfig, TrapMode,
+    },
     script,
     session::{self, Session},
     transport::Transport,
@@ -234,6 +237,100 @@ const TOOLS: &[Tool] = &[
         read_only: true,
     },
     Tool {
+        name: "arm_trap",
+        title: "Arm a trap",
+        description: "For bugs that take hours or days to show: leaves an ES module running on \
+                      the probe with no computer attached, through disconnects and probe \
+                      restarts, and records an incident to the probe's flash each time one of \
+                      its watches fires or it calls agent.incident(). A watch handler can return \
+                      { action, data } to put its own JSON (say, a history it kept) in the \
+                      incident. Replaces the armed trap and ends this session first. The module \
+                      gets this server's permissions. It restarts from the top after a probe \
+                      restart or a pause, so keep its state small and rebuildable. Read the \
+                      si://guide resource's trap section first.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "source": { "type": "string", "description": "One ES module; bundle local imports into it." },
+                    "trap_name": { "type": "string", "minLength": 1, "maxLength": 23 },
+                    "mode": { "type": "string", "enum": ["yield", "exclusive"],
+                              "description": "yield (default): GDB attaching or a programming run pauses the trap, \
+                                              which restarts after. exclusive: they are refused while it is armed." },
+                    "incidents_per_hour": { "type": "integer", "minimum": 0, "maximum": 3600,
+                                            "description": "More are only counted; 0 for the probe's default." },
+                    "name": { "type": "string", "description": "File name in stack traces (default trap.js)." },
+                    "timeout_ms": wait_arg("the top level"),
+                },
+                "required": ["source", "trap_name"],
+                "additionalProperties": false,
+            })
+        },
+        read_only: false,
+    },
+    Tool {
+        name: "trap_status",
+        title: "Trap status",
+        description: "The armed trap (name, mode, state: running, waiting, paused or failed, and \
+                      why), how often it started, and the probe's incident count. While a trap \
+                      is armed no session can open: wait_event and get_capture read the trap's \
+                      events and captures instead.",
+        schema: no_args,
+        read_only: true,
+    },
+    Tool {
+        name: "disarm_trap",
+        title: "Disarm the trap",
+        description: "Stops and forgets the trap; the target is left as it is and the incidents \
+                      stay.",
+        schema: no_args,
+        read_only: false,
+    },
+    Tool {
+        name: "list_incidents",
+        title: "List incidents",
+        description: "The incidents on the probe, oldest first: id, watch or script, name, trap, \
+                      time (UTC when the probe knew it, else boot count and uptime), size.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": { "after_id": { "type": "integer", "minimum": 0 } },
+                "additionalProperties": false,
+            })
+        },
+        read_only: true,
+    },
+    Tool {
+        name: "get_incident",
+        title: "Read an incident",
+        description: "One incident: what happened, the handler's data, what the watch did, the \
+                      events before it, and the capture decoded as get_capture does.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": { "incident_id": { "type": "integer", "minimum": 1 } },
+                "required": ["incident_id"],
+                "additionalProperties": false,
+            })
+        },
+        read_only: true,
+    },
+    Tool {
+        name: "delete_incident",
+        title: "Delete incidents",
+        description: "Deletes one incident, or all of them with incident_id 0. The probe also \
+                      drops the oldest when its space runs out.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": { "incident_id": { "type": "integer", "minimum": 0 } },
+                "required": ["incident_id"],
+                "additionalProperties": false,
+            })
+        },
+        read_only: false,
+    },
+    Tool {
         name: "close_session",
         title: "Close the session",
         description: "Ends the agent session: watches and vector catch go, then the target is \
@@ -274,6 +371,7 @@ pub struct Device {
     lost: Option<String>, // why the last session ended, until a new one says so
     cursor: u32,
     evals: u32,
+    trap_noted: bool,
 }
 
 type ToolResult = Result<Value, String>;
@@ -338,6 +436,7 @@ impl Device {
             lost: None,
             cursor: 0,
             evals: 0,
+            trap_noted: false,
         }
     }
 
@@ -463,6 +562,17 @@ impl Device {
                 .map(|_| json!({ "reset": true, "running": true })),
             "lookup_symbol" => self.lookup_symbol(args),
             "close_session" => self.close_session(),
+            "arm_trap" => self.arm_trap(args, &mut notes),
+            "trap_status" => self
+                .with_connection(|c| c.trap_status())
+                .map(|st| agent::trap_status_json(&st)),
+            "disarm_trap" => self.with_connection(|c| c.trap_disarm()).map(|_| {
+                self.trap_noted = false;
+                json!({ "disarmed": true })
+            }),
+            "list_incidents" => self.list_incidents(args),
+            "get_incident" => self.get_incident(args),
+            "delete_incident" => self.delete_incident(args),
             _ => Err(format!("no tool {name}")),
         };
         let mut value = result?;
@@ -629,7 +739,10 @@ impl Device {
             ),
             Some(_) => return Err("kinds must be an array of strings".into()),
         };
-        self.session(notes)?;
+        let via_trap = self.trap_instead(notes)?;
+        if !via_trap {
+            self.session(notes)?;
+        }
         let mut after = match args.get("after_seq") {
             None => self.cursor,
             Some(v) => v
@@ -644,7 +757,7 @@ impl Device {
         loop {
             let mut next_read = Instant::now() + EVENT_RECHECK;
             loop {
-                let read = self.with_session(notes, |c| c.event_read(after))?;
+                let read = self.on_device(via_trap, notes, |c| c.event_read(after))?;
                 dropped = read.dropped;
                 newest = read.newest_seq;
                 if after > newest {
@@ -674,7 +787,7 @@ impl Device {
                 if cancel.requested() {
                     return Err("cancelled".into());
                 }
-                let notice = self.with_session(notes, |c| {
+                let notice = self.on_device(via_trap, notes, |c| {
                     c.poll(EVENT_POLL)?;
                     Ok(c.take_agent_notice())
                 })?;
@@ -706,8 +819,9 @@ impl Device {
             .and_then(|i| u32::try_from(i).ok())
             .filter(|&i| i != 0)
             .ok_or("capture_id must be a positive number")?;
+        let via_trap = self.trap_instead(notes)?;
         let data = self
-            .with_session(notes, |c| c.capture_read(id))
+            .on_device(via_trap, notes, |c| c.capture_read(id))
             .map_err(|e| {
                 if e.contains("status 2") {
                     format!("capture {id} is gone: only the latest few are kept")
@@ -808,6 +922,160 @@ impl Device {
         }
         let addr = address(args.get("address").ok_or("give a name or an address")?)?;
         Ok(json!({ "address": agent::hex(addr), "symbol": syms.describe(addr) }))
+    }
+
+    /// Runs `f` on the connection without a session.
+    fn with_connection<R>(
+        &mut self,
+        f: impl FnOnce(&mut DeviceSession) -> session::Result<R>,
+    ) -> Result<R, String> {
+        let conn = self.connection()?;
+        f(conn).map_err(|e| {
+            let text = session_error(&e);
+            if self.conn.as_ref().is_none_or(|c| c.is_closed()) {
+                self.drop_connection(text.clone());
+            }
+            text
+        })
+    }
+
+    /// With no session open and a trap armed, the trap's events and captures are read instead.
+    fn trap_instead(&mut self, notes: &mut Vec<String>) -> Result<bool, String> {
+        if self.info.is_some() {
+            return Ok(false);
+        }
+        let status = self.with_connection(|c| c.trap_status())?;
+        let Some(cfg) = status.config else {
+            return Ok(false);
+        };
+        if !self.trap_noted {
+            notes.push(format!(
+                "Trap '{}' is armed, so no session opens: these are the trap's events and \
+                 captures. Its incidents are kept on the probe (list_incidents).",
+                cfg.name
+            ));
+            self.trap_noted = true;
+            self.cursor = 0;
+        }
+        Ok(true)
+    }
+
+    fn on_device<R>(
+        &mut self,
+        via_trap: bool,
+        notes: &mut Vec<String>,
+        f: impl FnOnce(&mut DeviceSession) -> session::Result<R>,
+    ) -> Result<R, String> {
+        if via_trap {
+            self.with_connection(f)
+        } else {
+            self.with_session(notes, f)
+        }
+    }
+
+    fn arm_trap(&mut self, args: &Value, notes: &mut Vec<String>) -> ToolResult {
+        let source = args["source"].as_str().ok_or("arm_trap needs source")?;
+        let trap_name = args["trap_name"]
+            .as_str()
+            .filter(|n| !n.is_empty() && n.len() <= 23)
+            .ok_or("trap_name must be 1-23 bytes")?;
+        let mode = match args.get("mode").and_then(Value::as_str) {
+            None | Some("yield") => TrapMode::Yield,
+            Some("exclusive") => TrapMode::Exclusive,
+            Some(m) => return Err(format!("mode {m}: yield or exclusive")),
+        };
+        let per_hour = args.get("incidents_per_hour").map_or(Ok(0), |v| {
+            v.as_u64()
+                .filter(|&n| n <= 3600)
+                .map(|n| n as u32)
+                .ok_or("incidents_per_hour must be 0-3600")
+        })?;
+        let name = args["name"].as_str().unwrap_or("trap.js");
+        let blob = sidp_qjsc::compile_container(source, name, Strip::None)
+            .map_err(|e| format!("doesn't compile: {e}"))?;
+        let wait = wait_ms(args)?;
+        if self.info.is_some() {
+            self.with_connection(|c| c.agent_close())?;
+            self.info = None;
+            notes.push("The agent session was closed to arm the trap.".into());
+        }
+        let config = TrapConfig {
+            name: trap_name.to_owned(),
+            mode: mode as i32,
+            permissions: Some(self.options.allow.into()),
+            connect_under_reset: self.options.connect_under_reset,
+            incidents_per_hour: per_hour,
+        };
+        let status = self.with_connection(|c| c.trap_arm(config, &blob, wait))?;
+        let first = self.script_result(status.first_result.clone().unwrap_or_default());
+        let mut out = agent::trap_status_json(&status);
+        out["first_run"] = first;
+        if status.config.is_none() {
+            out["note"] = "not armed: the module's top level failed, see first_run".into();
+        }
+        self.trap_noted = false;
+        Ok(out)
+    }
+
+    fn list_incidents(&mut self, args: &Value) -> ToolResult {
+        let after = args.get("after_id").map_or(Ok(0), |v| {
+            v.as_u64()
+                .and_then(|i| u32::try_from(i).ok())
+                .ok_or("after_id must be a 32-bit number")
+        })?;
+        let list = self.with_connection(|c| c.incident_list(after))?;
+        let items: Vec<Value> = list
+            .into_iter()
+            .map(|i| {
+                let mut v = json!({
+                    "id": i.id,
+                    "kind": if i.kind == 0 { "watch" } else { "script" },
+                    "name": i.name,
+                    "trap": i.trap,
+                    "boot": i.boot,
+                    "uptime_s": i.uptime_us as f64 / 1e6,
+                    "size": i.size,
+                });
+                if i.utc_ms != 0 {
+                    v["utc"] = agent::utc_text(i.utc_ms).into();
+                }
+                v
+            })
+            .collect();
+        Ok(json!({ "incidents": items }))
+    }
+
+    fn get_incident(&mut self, args: &Value) -> ToolResult {
+        let id = args["incident_id"]
+            .as_u64()
+            .and_then(|i| u32::try_from(i).ok())
+            .filter(|&i| i != 0)
+            .ok_or("incident_id must be a positive number")?;
+        let data = self.with_connection(|c| c.incident_read(id)).map_err(|e| {
+            if e.contains("status 2") {
+                format!("there is no incident {id}")
+            } else {
+                e
+            }
+        })?;
+        let incident = Incident::parse(&data).map_err(|e| e.to_string())?;
+        Ok(incident.to_json(self.options.symbols.as_ref()))
+    }
+
+    fn delete_incident(&mut self, args: &Value) -> ToolResult {
+        let id = args["incident_id"]
+            .as_u64()
+            .and_then(|i| u32::try_from(i).ok())
+            .ok_or("incident_id must be a number")?;
+        self.with_connection(|c| c.incident_delete(id))
+            .map_err(|e| {
+                if e.contains("status 2") {
+                    format!("there is no incident {id}")
+                } else {
+                    e
+                }
+            })?;
+        Ok(json!({ "deleted": id }))
     }
 
     fn close_session(&mut self) -> ToolResult {

@@ -5,9 +5,10 @@ use sidp_agent::{
     agent::{
         self, Allow, SessionEnd,
         proto::{
-            CaptureReadRequest, CaptureReadResponse, EvalRequest, Event, EventNotify,
-            EventReadRequest, EventReadResponse, OpenRequest, RunRequest, ScriptResult,
-            SessionInfo, UploadRequest,
+            ArmRequest, CaptureReadRequest, CaptureReadResponse, EvalRequest, Event, EventNotify,
+            EventReadRequest, EventReadResponse, IncidentDeleteRequest, IncidentInfo,
+            IncidentListRequest, IncidentListResponse, IncidentReadRequest, IncidentReadResponse,
+            OpenRequest, RunRequest, ScriptResult, SessionInfo, TrapStatus, UploadRequest,
         },
     },
     codec::{Frame, LOG, RESPONSE},
@@ -37,6 +38,10 @@ struct Device {
     closes: usize,
     connects: usize,
     fail_event_read: bool,
+    trap: Option<ArmRequest>,
+    first_result: Option<ScriptResult>,
+    incidents: Vec<(u32, Vec<u8>)>,
+    status: i32,
 }
 
 struct Fake(Arc<Mutex<Device>>);
@@ -59,6 +64,10 @@ impl Device {
                 ..Default::default()
             }
             .encode_to_vec(),
+            agent::AGENT_OPEN if self.trap.is_some() => {
+                self.status = agent::STATUS_TRAP_ARMED;
+                Vec::new()
+            }
             agent::AGENT_OPEN => {
                 self.opens.push(OpenRequest::decode(p).unwrap());
                 SessionInfo {
@@ -134,25 +143,94 @@ impl Device {
                 }
                 .encode_to_vec()
             }
+            agent::TRAP_ARM => {
+                let request = ArmRequest::decode(p).unwrap();
+                assert!(sidp_qjsc::is_container(&request.bytecode));
+                let first = self.first_result.take().unwrap_or_else(|| ok(""));
+                let armed = first.outcome == 0 || first.outcome == 2;
+                self.trap = armed.then_some(request);
+                TrapStatus {
+                    first_result: Some(first),
+                    ..self.trap_status()
+                }
+                .encode_to_vec()
+            }
+            agent::TRAP_STATUS => self.trap_status().encode_to_vec(),
+            agent::TRAP_DISARM => {
+                self.trap = None;
+                Vec::new()
+            }
+            agent::INCIDENT_LIST => {
+                let after = IncidentListRequest::decode(p).unwrap().after_id;
+                IncidentListResponse {
+                    incidents: self
+                        .incidents
+                        .iter()
+                        .filter(|(id, _)| *id > after)
+                        .map(|(id, data)| IncidentInfo {
+                            id: *id,
+                            size: data.len() as u32,
+                            name: "hardfault".into(),
+                            trap: "hunt".into(),
+                            boot: 7,
+                            utc_ms: 1_764_059_400_250,
+                            ..Default::default()
+                        })
+                        .collect(),
+                    more: false,
+                }
+                .encode_to_vec()
+            }
+            agent::INCIDENT_READ => {
+                let request = IncidentReadRequest::decode(p).unwrap();
+                let Some((_, data)) = self.incidents.iter().find(|(id, _)| *id == request.id)
+                else {
+                    self.status = 2;
+                    return Ok(Vec::new());
+                };
+                let at = request.offset as usize;
+                let end = (at + 4096).min(data.len());
+                IncidentReadResponse {
+                    total: data.len() as u32,
+                    data: data[at..end].to_vec(),
+                }
+                .encode_to_vec()
+            }
+            agent::INCIDENT_DELETE => {
+                let id = IncidentDeleteRequest::decode(p).unwrap().id;
+                self.incidents.retain(|(i, _)| id != 0 && *i != id);
+                Vec::new()
+            }
             op => panic!("unexpected opcode 0x{op:04x}"),
         })
+    }
+}
+
+impl Device {
+    fn trap_status(&self) -> TrapStatus {
+        TrapStatus {
+            config: self.trap.as_ref().and_then(|t| t.config.clone()),
+            state: if self.trap.is_some() { 1 } else { 0 },
+            incidents: self.incidents.len() as u32,
+            ..Default::default()
+        }
     }
 }
 
 impl Transport for Fake {
     fn send(&mut self, frame: &Frame, _: Duration) -> io::Result<()> {
         let mut d = self.0.lock().unwrap();
-        let status: i32 = if frame.opcode == agent::CAPTURE_READ
+        let capture_gone = frame.opcode == agent::CAPTURE_READ
             && CaptureReadRequest::decode(frame.payload.as_slice())
                 .unwrap()
                 .capture_id
-                != 9
-        {
+                != 9;
+        let body = d.answer(frame)?;
+        let status = if capture_gone {
             2
         } else {
-            0
+            std::mem::take(&mut d.status)
         };
-        let body = d.answer(frame)?;
         let mut payload = status.to_le_bytes().to_vec();
         if status == 0 {
             payload.extend(body);
@@ -587,4 +665,158 @@ fn agent_notices_are_kept_for_the_next_wait() {
     assert_eq!(session.take_agent_notice(), Some(12));
     assert_eq!(session.take_agent_notice(), None);
     assert!(!session.is_closed());
+}
+
+fn incident_bytes(id: u32) -> Vec<u8> {
+    let mut b = b"SIIN".to_vec();
+    b.extend([1, 0, 2, 0]);
+    b.extend(id.to_le_bytes());
+    b.extend(0u32.to_le_bytes());
+    b.extend(7u32.to_le_bytes());
+    b.extend(0u32.to_le_bytes());
+    b.extend(5_000_000u64.to_le_bytes());
+    b.extend(1_764_059_400_250u64.to_le_bytes());
+    let mut name = [0u8; 24];
+    name[..9].copy_from_slice(b"hardfault");
+    b.extend(name);
+    let mut trap = [0u8; 24];
+    trap[..4].copy_from_slice(b"hunt");
+    b.extend(trap);
+    b.extend([0u8; 8]);
+    assert_eq!(b.len(), 96);
+    for (ty, body) in [
+        (
+            1u8,
+            &br#"{"kind":"watch","on":"fault","cause":"HardFault","pc":"0x08000123"}"#[..],
+        ),
+        (2, br#"{"history":[1,2,3]}"#),
+        (
+            4,
+            br#"[{"seq":5,"us":1,"kind":"emit","capture":0,"data":{"name":"x"}}]"#,
+        ),
+        (3, br#"{"action":"resume","handler":"ok"}"#),
+    ] {
+        b.extend([ty, 0, 0, 0]);
+        b.extend((body.len() as u32).to_le_bytes());
+        b.extend(body);
+        b.resize(b.len().div_ceil(4) * 4, 0);
+    }
+    let len = b.len() as u32;
+    b[12..16].copy_from_slice(&len.to_le_bytes());
+    b
+}
+
+#[test]
+fn a_trap_is_armed_inspected_and_disarmed() {
+    let device = Arc::new(Mutex::new(Device::default()));
+    device.lock().unwrap().events = (1..=3)
+        .map(|seq| Event {
+            seq,
+            kind: "emit".into(),
+            json: format!(r#"{{"name":"n{seq}"}}"#),
+            ..Default::default()
+        })
+        .collect();
+    let replies = serve(
+        &device,
+        &[
+            init(),
+            call(1, "eval", json!({"code": "1"})),
+            call(
+                2,
+                "arm_trap",
+                json!({"source": "export const a = 1;", "trap_name": "hunt", "incidents_per_hour": 30}),
+            ),
+            call(3, "eval", json!({"code": "1"})),
+            call(4, "wait_event", json!({"timeout_ms": 0})),
+            call(5, "trap_status", json!({})),
+            call(6, "disarm_trap", json!({})),
+            call(7, "trap_status", json!({})),
+        ],
+    );
+    let (v, err) = tool_json(&replies, 2);
+    assert!(!err, "{v}");
+    assert_eq!(
+        (v["armed"].clone(), v["state"].clone(), v["mode"].clone()),
+        (json!(true), json!("running"), json!("yield"))
+    );
+    assert_eq!(v["first_run"]["outcome"], "ok");
+    assert!(v["notes"][0].as_str().unwrap().contains("closed"), "{v}");
+    let (v, err) = tool_json(&replies, 3);
+    assert!(err && v.as_str().unwrap().contains("trap is armed"), "{v}");
+    let (v, err) = tool_json(&replies, 4);
+    assert!(!err, "{v}");
+    assert_eq!(v["events"].as_array().unwrap().len(), 3);
+    assert!(
+        v["notes"][0]
+            .as_str()
+            .unwrap()
+            .contains("Trap 'hunt' is armed"),
+        "{v}"
+    );
+    let (v, _) = tool_json(&replies, 5);
+    assert_eq!(v["name"], "hunt");
+    assert_eq!(v["incidents_per_hour"], 30);
+    assert_eq!(v["permissions"]["write"], true);
+    assert_eq!(tool_json(&replies, 7).0["armed"], false);
+    let d = device.lock().unwrap();
+    assert_eq!((d.opens.len(), d.closes), (1, 1));
+}
+
+#[test]
+fn a_failing_trap_is_not_armed() {
+    let device = Arc::new(Mutex::new(Device::default()));
+    device.lock().unwrap().first_result = Some(ScriptResult {
+        outcome: 1,
+        error: "ReferenceError: x is not defined".into(),
+        ..Default::default()
+    });
+    let replies = serve(
+        &device,
+        &[
+            init(),
+            call(
+                1,
+                "arm_trap",
+                json!({"source": "x;", "trap_name": "t", "mode": "exclusive"}),
+            ),
+        ],
+    );
+    let (v, err) = tool_json(&replies, 1);
+    assert!(!err, "{v}");
+    assert_eq!(v["armed"], false);
+    assert_eq!(v["first_run"]["outcome"], "error");
+    assert!(device.lock().unwrap().trap.is_none());
+}
+
+#[test]
+fn incidents_are_listed_read_and_deleted() {
+    let device = Arc::new(Mutex::new(Device::default()));
+    device.lock().unwrap().incidents = vec![(4, incident_bytes(4)), (5, incident_bytes(5))];
+    let replies = serve(
+        &device,
+        &[
+            init(),
+            call(1, "list_incidents", json!({})),
+            call(2, "get_incident", json!({"incident_id": 5})),
+            call(3, "get_incident", json!({"incident_id": 6})),
+            call(4, "delete_incident", json!({"incident_id": 4})),
+            call(5, "list_incidents", json!({})),
+        ],
+    );
+    let (v, _) = tool_json(&replies, 1);
+    assert_eq!(v["incidents"].as_array().unwrap().len(), 2);
+    assert_eq!(v["incidents"][0]["utc"], "2025-11-25T08:30:00.250Z");
+    let (v, err) = tool_json(&replies, 2);
+    assert!(!err, "{v}");
+    assert_eq!(v["id"], 5);
+    assert_eq!(v["trap"], "hunt");
+    assert_eq!(v["cause"]["cause"], "HardFault");
+    assert_eq!(v["data"]["history"], json!([1, 2, 3]));
+    assert_eq!(v["outcome"]["action"], "resume");
+    assert_eq!(v["events_before"][0]["data"]["name"], "x");
+    let (v, err) = tool_json(&replies, 3);
+    assert!(err && v.as_str().unwrap().contains("no incident 6"), "{v}");
+    let (v, _) = tool_json(&replies, 5);
+    assert_eq!(v["incidents"][0]["id"], 5);
 }

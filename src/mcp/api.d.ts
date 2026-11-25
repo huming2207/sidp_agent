@@ -89,6 +89,10 @@ declare namespace agent {
     /** An 'emit' event {name, data}. name: 1-31 bytes; data's JSON: about 700 bytes at most.
      *  false when rate limited (console and emit share 20 a second, bursts of 40). */
     function emit(name: string, data?: unknown): boolean;
+    /** In a trap: records an incident on the probe and resolves with its id (0 when the trap's
+     *  incidents_per_hour ran out). In a session: only an 'incident' event, id 0.
+     *  name: 1-23 bytes; data's JSON: at most 8191 bytes. Await it before the next one. */
+    function incident(name: string, data?: unknown): Promise<number>;
     function watches(): WatchInfo[];
     function permissions(): { write: boolean; flash: boolean; reset: boolean };
 }
@@ -114,9 +118,11 @@ interface WatchSpec {
 }
 
 /** The returned verdict counts when the core was held (ev.held): 'hold' (or undefined)
- *  keeps it halted, 'resume' lets it run, 'reset' resets it (needs reset). */
-type WatchHandler = (ev: WatchEvent) => Verdict | Promise<Verdict>;
+ *  keeps it halted, 'resume' lets it run, 'reset' resets it (needs reset).
+ *  In a trap, { action, data } also puts data (JSON, at most 8191 bytes) in the incident. */
+type WatchHandler = (ev: WatchEvent) => Verdict | HandlerResult | Promise<Verdict | HandlerResult>;
 type Verdict = 'hold' | 'resume' | 'reset' | undefined;
+interface HandlerResult { action?: Verdict; data?: unknown }
 
 interface WatchEvent {
     watch: number;
@@ -129,6 +135,7 @@ interface WatchEvent {
     held: boolean;            // the core waits for this handler's verdict
     pc: number;               // 0 unless halted
     captureId: number;        // get_capture; 0 when every capture slot was busy
+    incidentId: number;       // in a trap, the incident this firing recorded; else 0
     regs?: Record<string, number>; // r0-r12 sp lr pc xpsr msp psp primask basepri faultmask control
     fault?: { shcsr?: number; cfsr?: number; hfsr?: number; dfsr?: number;
               mmfar?: number; bfar?: number; afsr?: number };

@@ -133,6 +133,17 @@ sidp-agent agent run --port /dev/ttyACM0 watch-faults.js --seconds 60 --elf buil
 
 `agent run` prints the session's events as JSON lines.
 
+For bugs that take days, a trap keeps a module running on the device with no
+computer attached and records incidents to its flash (MCP: `arm_trap`,
+`trap_status`, `list_incidents`, `get_incident`):
+
+```sh
+sidp-agent trap arm hunt.js --name hunt --port /dev/ttyACM0 [--mode yield|exclusive]
+sidp-agent incident list --port /dev/ttyACM0
+sidp-agent incident show 12 --elf build/app.elf --port /dev/ttyACM0
+sidp-agent trap disarm --port /dev/ttyACM0
+```
+
 ## Production log
 
 The device records every run and every boot until the log is collected:

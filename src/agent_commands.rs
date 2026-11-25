@@ -2,7 +2,7 @@
 use crate::commands::{Connection, DeviceSession};
 use clap::{Args, ValueEnum};
 use sidp_agent::{
-    agent::{self, Allow, Outcome, SessionEnd, Symbols},
+    agent::{self, Allow, Incident, Outcome, SessionEnd, Symbols, TrapConfig, TrapMode},
     mcp, script,
 };
 use std::{
@@ -200,5 +200,148 @@ pub fn run(
         }
     }
     session.agent_close()?;
+    Ok(())
+}
+
+/// What a trap gets; see `sidp-agent trap arm --help`.
+#[derive(Args)]
+pub struct TrapOptions {
+    /// The trap's name, shown in its status and incidents.
+    #[arg(long, value_parser = trap_name)]
+    name: String,
+    /// What happens when GDB attaches or a programming run starts: `yield`
+    /// pauses the trap and restarts it after, `exclusive` refuses them.
+    #[arg(long, value_enum, default_value_t = TrapModeArg::Yield)]
+    mode: TrapModeArg,
+    /// Incidents recorded per hour; more are only counted. 0 for the device's default.
+    #[arg(long, default_value_t = 0)]
+    incidents_per_hour: u32,
+    /// Let the module write target memory and core registers, and call target functions.
+    #[arg(long)]
+    allow_write: bool,
+    /// Let the module erase and write target flash.
+    #[arg(long)]
+    allow_flash: bool,
+    /// Let the module reset the target.
+    #[arg(long)]
+    allow_reset: bool,
+    /// Hold the target in reset while connecting; it then starts halted.
+    #[arg(long)]
+    connect_under_reset: bool,
+}
+
+/// A trap's ownership mode.
+#[derive(Clone, Copy, ValueEnum)]
+pub enum TrapModeArg {
+    /// GDB and programming runs pause the trap.
+    Yield,
+    /// GDB and programming runs are refused while the trap is armed.
+    Exclusive,
+}
+
+fn trap_name(s: &str) -> Result<String, String> {
+    if s.is_empty() || s.len() > 23 {
+        return Err("1-23 bytes".into());
+    }
+    Ok(s.to_owned())
+}
+
+impl TrapOptions {
+    fn config(&self) -> TrapConfig {
+        TrapConfig {
+            name: self.name.clone(),
+            mode: match self.mode {
+                TrapModeArg::Yield => TrapMode::Yield,
+                TrapModeArg::Exclusive => TrapMode::Exclusive,
+            } as i32,
+            permissions: Some(
+                Allow {
+                    write: self.allow_write,
+                    flash: self.allow_flash,
+                    reset: self.allow_reset,
+                }
+                .into(),
+            ),
+            connect_under_reset: self.connect_under_reset,
+            incidents_per_hour: self.incidents_per_hour,
+        }
+    }
+}
+
+fn open_plain(connection: &Connection) -> Result<DeviceSession, Box<dyn Error>> {
+    let mut session = connection.open()?;
+    script::check_device(&session.device_info()?, false)?;
+    Ok(session)
+}
+
+/// Arms `file` as the device's trap.
+pub fn trap_arm(connection: &Connection, options: &TrapOptions, file: &Path) -> CommandResult {
+    let source = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let name = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("trap.js");
+    let blob = sidp_qjsc::compile_container(&source, name, script::Strip::None)?;
+    let mut session = open_plain(connection)?;
+    let status = session.trap_arm(options.config(), &blob, Duration::from_secs(5))?;
+    if status.config.is_none() {
+        let first = status.first_result.unwrap_or_default();
+        print_result(&first)?;
+        return Err("the trap was not armed".into());
+    }
+    println!("{:#}", agent::trap_status_json(&status));
+    Ok(())
+}
+
+/// Prints the trap's status as JSON.
+pub fn trap_status(connection: &Connection) -> CommandResult {
+    let status = open_plain(connection)?.trap_status()?;
+    println!("{:#}", agent::trap_status_json(&status));
+    Ok(())
+}
+
+/// Disarms the trap.
+pub fn trap_disarm(connection: &Connection) -> CommandResult {
+    open_plain(connection)?.trap_disarm()?;
+    eprintln!("Trap disarmed");
+    Ok(())
+}
+
+/// Lists the device's incidents.
+pub fn incident_list(connection: &Connection) -> CommandResult {
+    let list = open_plain(connection)?.incident_list(0)?;
+    if list.is_empty() {
+        eprintln!("No incidents");
+    }
+    for i in list {
+        let when = if i.utc_ms != 0 {
+            agent::utc_text(i.utc_ms)
+        } else {
+            format!("boot {} +{:.1} s", i.boot, i.uptime_us as f64 / 1e6)
+        };
+        println!(
+            "{:>6}  {:<6}  {:<23}  {:<23}  {:>6} B  {when}",
+            i.id,
+            if i.kind == 0 { "watch" } else { "script" },
+            i.name,
+            i.trap,
+            i.size
+        );
+    }
+    Ok(())
+}
+
+/// Prints an incident as JSON.
+pub fn incident_show(connection: &Connection, id: u32, elf: Option<&Path>) -> CommandResult {
+    let symbols = load_symbols(elf)?;
+    let data = open_plain(connection)?.incident_read(id)?;
+    let incident = Incident::parse(&data)?;
+    println!("{:#}", incident.to_json(symbols.as_ref()));
+    Ok(())
+}
+
+/// Deletes an incident, or all of them for 0.
+pub fn incident_rm(connection: &Connection, id: u32) -> CommandResult {
+    open_plain(connection)?.incident_delete(id)?;
     Ok(())
 }

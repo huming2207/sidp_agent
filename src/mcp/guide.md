@@ -140,6 +140,51 @@ target.write32(0xE0002008, (addr & 0x1FFFFFFC) | ((addr & 2) ? 0x80000001 : 0x40
 with a `halt` watch to handle the stop. Clear the comparator (write 0) when
 done.
 
+## Traps
+
+A session lasts as long as this conversation. For a bug that takes hours or
+days to show, `arm_trap` leaves a module on the probe instead. It keeps
+running with no computer attached, through disconnects and probe restarts,
+and each time one of its watches fires, or it calls `agent.incident(name,
+data)`, the probe writes an *incident* to its flash: what happened, the
+capture, the events just before, and the data the handler returned as
+`{ action, data }`. Come back later with `list_incidents` and
+`get_incident`.
+
+- Prefer `reflex: 'none'`, or a handler that returns `'resume'`: a trap
+  that holds the core stops the target until someone looks. Holding is right
+  when you want GDB to land on the fault.
+- The module starts from the top after a probe restart, after the target
+  stopped answering, and after it yielded to GDB or a programming run. Keep
+  what it remembers small and rebuildable; put history in the handler's
+  `data`, where the incident keeps it.
+- In `yield` mode (default) GDB attaching or a programming run pauses the
+  trap; `exclusive` refuses them while it is armed.
+- Incidents per hour are limited (`incidents_per_hour`); the rest are only
+  counted. The probe keeps a limited number and drops the oldest.
+- While a trap is armed no session opens: `trap_status`, `wait_event` and
+  `get_capture` show what it is doing; `disarm_trap` frees the target.
+- Try the module with `run_script` first: in a session `agent.incident()`
+  only makes an `incident` event.
+
+A trap that keeps the last 64 values of a state variable and saves them
+with each fault, then lets the firmware's own fault handler run:
+
+```js
+import { watch, read32, delay } from 'si:target';
+
+const STATE = 0x20000100;
+const history = [];
+watch({ on: 'fault', capture: { stack: 512 } }, () => ({ action: 'resume', data: { history } }));
+for (;;) {
+    history.push(read32(STATE));
+    if (history.length > 64) history.shift();
+    await delay(100);
+}
+```
+
+Its top level never finishes, so `arm_trap` answers `pending`; it is armed.
+
 ## Care
 
 - Reading peripheral registers can have side effects (clearing flags, popping
