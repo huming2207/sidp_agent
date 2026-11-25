@@ -1,2 +1,4 @@
 # Tests edit fixture text by exact lines; keep LF on Windows checkouts too
 tests/fixtures/*.yaml text eol=lf
+*.qbc binary
+qjsc/tests/fixtures/*.js text eol=lf

@@ -4,7 +4,7 @@
 //! Soul Injector's `sidp_client/proto`; keep them identical. The firmware
 //! decodes jobs with nanopb using the fixed limits below, so the compiler
 //! must reject anything larger before encoding.
-#![allow(missing_docs)]
+#![allow(missing_docs, rustdoc::invalid_html_tags)]
 
 include!(concat!(env!("OUT_DIR"), "/si.job.rs"));
 
@@ -64,5 +64,9 @@ mod tests {
         assert_eq!(max_count("si.job.Target.self_tests"), MAX_SELF_TESTS);
         assert_eq!(max_count("si.job.Esp32.images"), MAX_IMAGES);
         assert_eq!(max_count("si.job.Procedure.steps"), MAX_STEPS);
+        assert_eq!(
+            max_len("si.job.Script.asset"),
+            crate::manage::MAX_ASSET_NAME_LEN
+        );
     }
 }

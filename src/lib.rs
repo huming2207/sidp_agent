@@ -11,5 +11,6 @@ pub mod login;
 pub mod manage;
 pub mod ntp;
 pub mod power;
+pub mod script;
 pub mod session;
 pub mod transport;

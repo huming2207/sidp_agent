@@ -1,6 +1,6 @@
 //! Job compiler tests against the Soul Injector example YAML files.
 use prost::Message;
-use sidp_agent::compile::{Compiled, ImageHashes, Sources, compile};
+use sidp_agent::compile::{Compiled, ImageHashes, ScriptRef, Sources, compile};
 use sidp_agent::job::step::Op;
 use sidp_agent::job::{FlashAlgorithm, Job, MAX_STEPS, SchemaVersion, Target};
 
@@ -45,6 +45,7 @@ fn compile_with(
         pre_program: pre,
         post_program: post,
         images,
+        script: None,
     };
     compile(&sources).map_err(|e| e.to_string())
 }
@@ -217,4 +218,52 @@ fn rejects_inputs_the_firmware_cannot_hold() {
     assert!(compile_error(&no_page_size, None).contains("page_size"));
     let wide_address = TARGET.replace("load_address: 0x20000020", "load_address: 0x120000020");
     assert!(compile_error(&wide_address, None).contains("32 bits"));
+}
+
+fn compile_script(
+    pre: Option<&str>,
+    asset: &str,
+    sha256: Option<[u8; 32]>,
+) -> Result<Compiled, String> {
+    let images = image_hashes(&[("firmware.bin", FIRMWARE_HASH)]);
+    let sources = Sources {
+        name: None,
+        target: TARGET,
+        variant: None,
+        pre_program: pre,
+        post_program: None,
+        images: &images,
+        script: Some(ScriptRef {
+            asset,
+            sha256,
+            hook_timeout_ms: 5000,
+            network: true,
+        }),
+    };
+    compile(&sources).map_err(|e| e.to_string())
+}
+
+#[test]
+fn script_job_carries_the_script() {
+    let job = compile_script(None, "rdp.qbc", Some([0x33; 32]))
+        .unwrap()
+        .job;
+    let script = job.script.as_ref().unwrap();
+    assert_eq!(script.asset, "rdp.qbc");
+    assert_eq!(script.sha256, [0x33; 32]);
+    assert_eq!(script.hook_timeout_ms, 5000);
+    assert!(script.network);
+    assert!(job.pre_program.is_none() && job.post_program.is_none());
+    assert_eq!(Job::decode(job.encode_to_vec().as_slice()).unwrap(), job);
+
+    let unpinned = compile_script(None, "rdp.qbc", None).unwrap().job;
+    assert!(unpinned.script.unwrap().sha256.is_empty());
+}
+
+#[test]
+fn script_excludes_procedures_and_image_names() {
+    let both = error_of(compile_script(Some(PRE), "rdp.qbc", None));
+    assert!(both.contains("not both"), "{both}");
+    let clash = error_of(compile_script(None, "firmware.bin", None));
+    assert!(clash.contains("both named"), "{clash}");
 }

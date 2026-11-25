@@ -1,13 +1,14 @@
 //! Management and job-compile commands of the command-line tool.
 use clap::Args;
 use prost::Message;
-use sidp_agent::compile::{self, ImageHashes, Sources};
+use sidp_agent::compile::{self, ImageHashes, ScriptRef, Sources};
 use sidp_agent::manage::{
     self, hex, proto::Outcome, proto::RunResult, proto::Stage, proto::Trigger,
 };
 use sidp_agent::{
     listener::is_device_id,
     ntp,
+    script::{self, Strip},
     session::Session,
     transport::{Transport, UsbCdc, WEBSOCKET_PORT, WebSocket},
 };
@@ -128,11 +129,34 @@ pub struct JobSource {
     #[arg(long)]
     variant: Option<String>,
     /// Procedure run before target detection (pre_prog.yaml).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "script")]
     pre: Option<PathBuf>,
     /// Procedure run after self tests (post_prog.yaml).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "script")]
     post: Option<PathBuf>,
+    /// JavaScript job script (docs/en/job-scripts.md), run instead of
+    /// --pre/--post. A .js file is compiled here; a .qbc container from
+    /// qjs_esp_bc.py is sent as it is.
+    #[arg(long)]
+    script: Option<PathBuf>,
+    /// Device file name of the compiled script; defaults to the script's
+    /// file name with .qbc.
+    #[arg(long, requires = "script")]
+    script_name: Option<String>,
+    /// Don't pin the script's SHA-256 in the job, so `asset push` can
+    /// replace it without pushing the job again.
+    #[arg(long, requires = "script")]
+    script_unpinned: bool,
+    /// Time limit per script hook in milliseconds; 0 for the firmware default (30 s).
+    #[arg(long, default_value_t = 0, requires = "script")]
+    hook_timeout_ms: u32,
+    /// Let the script use the network (esp:ws); the firmware must be built with it.
+    #[arg(long, requires = "script")]
+    script_network: bool,
+    /// What to leave out of the script's bytecode: `source` keeps line
+    /// numbers in errors, `debug` drops them too.
+    #[arg(long, value_enum, default_value_t = StripArg::Source, requires = "script")]
+    script_strip: StripArg,
     /// Job name shown by the device; defaults to the variant name.
     #[arg(long)]
     name: Option<String>,
@@ -141,11 +165,35 @@ pub struct JobSource {
     images: Vec<String>,
 }
 
+/// Bytecode stripping levels of `--script-strip`.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum StripArg {
+    /// Keep the source text.
+    None,
+    /// Drop the source text.
+    Source,
+    /// Drop the source text and line numbers.
+    Debug,
+}
+
+impl From<StripArg> for Strip {
+    fn from(arg: StripArg) -> Self {
+        match arg {
+            StripArg::None => Strip::None,
+            StripArg::Source => Strip::Source,
+            StripArg::Debug => Strip::Debug,
+        }
+    }
+}
+
 /// A compiled job with the images it pins.
 struct BuiltJob {
     bytes: Vec<u8>,
     name: String,
+    /// Images and the compiled script, uploaded before the job.
     images: Vec<(String, Vec<u8>)>,
+    /// The script needs network support on the device; `None` without a script.
+    script_network: Option<bool>,
 }
 
 /// Reads one line from standard input after printing `prompt`.
@@ -184,6 +232,18 @@ fn build_job(source: &JobSource) -> Result<BuiltJob, Box<dyn Error>> {
         images.push((name, data));
     }
 
+    let script = source
+        .script
+        .as_deref()
+        .map(|path| {
+            script::load(
+                path,
+                source.script_name.as_deref(),
+                source.script_strip.into(),
+            )
+        })
+        .transpose()?;
+
     let target_text = std::fs::read_to_string(&source.target)?;
     let pre_text = read_optional(source.pre.as_deref())?;
     let post_text = read_optional(source.post.as_deref())?;
@@ -194,16 +254,27 @@ fn build_job(source: &JobSource) -> Result<BuiltJob, Box<dyn Error>> {
         pre_program: pre_text.as_deref(),
         post_program: post_text.as_deref(),
         images: &hashes,
+        script: script.as_ref().map(|s| ScriptRef {
+            asset: &s.asset,
+            sha256: (!source.script_unpinned).then(|| script::sha256(s)),
+            hook_timeout_ms: source.hook_timeout_ms,
+            network: source.script_network,
+        }),
     };
     let compiled = compile::compile(&sources)?;
     for warning in &compiled.warnings {
         eprintln!("warning: {warning}");
     }
 
+    let script_network = script.as_ref().map(|_| source.script_network);
+    if let Some(script) = script {
+        images.push((script.asset, script.container));
+    }
     Ok(BuiltJob {
         bytes: compiled.job.encode_to_vec(),
         name: compiled.job.name,
         images,
+        script_network,
     })
 }
 
@@ -217,6 +288,17 @@ pub fn compile_job(source: &JobSource, output: &Path) -> CommandResult {
         job.bytes.len(),
         hex(&manage::sha256(&job.bytes))
     );
+    if job.script_network.is_some()
+        && let Some((asset, container)) = job.images.last()
+    {
+        let path = output.with_file_name(asset);
+        std::fs::write(&path, container)?;
+        println!(
+            "Wrote {} ({} bytes); upload it with `asset push` before the job",
+            path.display(),
+            container.len()
+        );
+    }
     Ok(())
 }
 
@@ -225,6 +307,16 @@ pub fn device_info(connection: &Connection) -> CommandResult {
     let info = connection.open()?.device_info()?;
     println!("Serial:   {}", info.serial);
     println!("Firmware: {}", info.firmware_version);
+    if info.js_version.is_empty() {
+        println!("Scripts:  not supported");
+    } else {
+        println!(
+            "Scripts:  QuickJS-NG {}, {} KiB, network {}",
+            info.js_version,
+            info.js_arena_kb,
+            if info.js_network { "allowed" } else { "off" }
+        );
+    }
     println!(
         "Storage:  {} KiB free of {} KiB",
         info.storage_free_kb, info.storage_total_kb
@@ -317,6 +409,16 @@ pub fn asset_push(connection: &Connection, file: &Path, name: Option<&str>) -> C
     Ok(())
 }
 
+/// Uploads the job's files and activates it, after checking that the
+/// device can run its script.
+fn push_built_job(session: &mut DeviceSession, job: &BuiltJob, trigger: Trigger) -> CommandResult {
+    if let Some(network) = job.script_network {
+        script::check_device(&session.device_info()?, network)?;
+    }
+    manage::push_job(session, &job.bytes, &job.images, trigger)?;
+    Ok(())
+}
+
 /// `job push`: compiles, uploads missing files and activates the job.
 pub fn job_push(connection: &Connection, source: &JobSource, auto: bool) -> CommandResult {
     let job = build_job(source)?;
@@ -327,7 +429,7 @@ pub fn job_push(connection: &Connection, source: &JobSource, auto: bool) -> Comm
     };
     let mut session = connection.open()?;
     set_device_time(&mut session, connection);
-    manage::push_job(&mut session, &job.bytes, &job.images, trigger)?;
+    push_built_job(&mut session, &job, trigger)?;
     println!(
         "Job '{}' active (sha256 {}), trigger {}",
         job.name,
@@ -367,7 +469,7 @@ pub fn program_target(
     let job = build_job(source)?;
     let mut session = connection.open()?;
     set_device_time(&mut session, connection);
-    manage::push_job(&mut session, &job.bytes, &job.images, Trigger::Manual)?;
+    push_built_job(&mut session, &job, Trigger::Manual)?;
     println!("Job '{}' active, programming", job.name);
     let run_id = session.job_run_once()?;
     wait_for_pass(&mut session, run_id)?;

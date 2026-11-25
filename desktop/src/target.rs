@@ -236,6 +236,7 @@ pub fn build_job(profile: &Profile) -> Result<BuiltJob, String> {
         pre_program: pre_program.as_deref(),
         post_program: post_program.as_deref(),
         images: &hashes,
+        script: None,
     };
     let compiled = compile::compile(&sources).map_err(|e| e.to_string())?;
     Ok(BuiltJob {
@@ -321,6 +322,7 @@ mod tests {
             pre_program: Some(&read("pre_prog.yaml")),
             post_program: Some(&read("post_prog.yaml")),
             images: &hashes,
+            script: None,
         })
         .unwrap();
         assert_eq!(job.bytes, expected.job.encode_to_vec());

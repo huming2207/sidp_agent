@@ -22,6 +22,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Install stable Rust with checks
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
@@ -36,11 +38,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Checkout compatible firmware protocol fixture
         uses: actions/checkout@v4
         with:
           repository: huming2207/sidp_client
-          ref: 8f56ff4622075038d8b1a5c3be509c9c26c1e70d
+          ref: e78efbd50b5e918aac28bf47a2cfa55c9e777780
           path: sidp-client-fixture
       - name: Check schema copies match sidp_client
         run: |

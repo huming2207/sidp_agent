@@ -238,6 +238,7 @@ fn run_entry_becomes_one_json_object() {
         job_name: "widget".to_owned(),
         job_sha256: vec![0xab; 32],
         error_code: 0x105,
+        ..Default::default()
     };
     let mut entry = log_entry(
         (2 << 40) | 7,
@@ -256,6 +257,35 @@ fn run_entry_becomes_one_json_object() {
     assert_eq!(json["trigger"], "TRIGGER_AUTO_ON_DETECT");
     assert_eq!(json["job_sha256"], "ab".repeat(32));
     assert_eq!(json["error_code"], 0x105);
+    assert!(json.get("script_sha256").is_none() && json.get("results").is_none());
+}
+
+#[test]
+fn script_run_entry_has_hash_and_results() {
+    let run = RunRecord {
+        result: Some(RunResult {
+            run_id: 4,
+            outcome: Outcome::Pass as i32,
+            ..Default::default()
+        }),
+        script_sha256: vec![0xcd; 32],
+        script_pinned: true,
+        results_json: r#"{"vdd":3.29,"ok":true}"#.to_owned(),
+        ..Default::default()
+    };
+    let entry = log_entry(9, LogEntryType::LogEntryRun, run.encode_to_vec());
+    let json = manage::log_entry_json("sn1", &entry);
+    assert_eq!(json["script_sha256"], "cd".repeat(32));
+    assert_eq!(json["script_pinned"], true);
+    assert_eq!(json["results"]["vdd"], 3.29);
+    assert_eq!(json["results"]["ok"], true);
+
+    let broken = RunRecord {
+        results_json: "{cut".to_owned(),
+        ..run
+    };
+    let entry = log_entry(10, LogEntryType::LogEntryRun, broken.encode_to_vec());
+    assert_eq!(manage::log_entry_json("sn1", &entry)["results"], "{cut");
 }
 
 #[test]

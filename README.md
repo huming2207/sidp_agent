@@ -9,6 +9,7 @@ WebSocket and graphical UI support are outside this first milestone.
 ## Development
 
 ```sh
+git submodule update --init   # qjsc/quickjs, for job scripts
 cargo test
 cargo doc --no-deps --open
 ```
@@ -69,6 +70,39 @@ or its files.
 applies the checks the firmware parser used to make and the device's fixed
 size limits, so errors are reported on the host.
 
+## Job scripts
+
+A job can run a JavaScript script instead of the pre/post procedures (Soul
+Injector's `docs/en/job-scripts.md`). The device doesn't parse JavaScript:
+the agent compiles the script to QuickJS-NG bytecode and uploads it with the
+job.
+
+```sh
+cargo run -- job push --port /dev/ttyACM0 --target target.yaml \
+    --script stm32wl-rdp.js --image firmware.bin=build/app.bin \
+    [--script-name rdp.qbc] [--hook-timeout-ms 60000] [--script-unpinned]
+```
+
+Syntax errors are reported here, with the line. Bundle local imports into one
+file first (esbuild, `bun build`); `si:*` imports are left to the device. A
+`.qbc` file from esp-quickjs-ng's `tools/qjs_esp_bc.py` is sent as it is.
+
+The device stores the script as `<file name>.qbc` and the job pins its
+SHA-256; `--script-unpinned` leaves the hash out, so `asset push` can replace
+the script without a new job. `--script-strip debug` drops line numbers from
+the bytecode, `none` keeps the source text (default `source`: line numbers
+only). `--script-network` lets the script use `esp:ws`, when the firmware is
+built with `CONFIG_SI_JS_NETWORK`.
+
+QuickJS-NG only loads bytecode of its own release and doesn't check it, so
+`qjsc/` (the `sidp-qjsc` crate) builds the QuickJS-NG release the firmware
+runs, from the `qjsc/quickjs` submodule. Before sending a script the agent
+compares it with the version in `device info`, and refuses a mismatch. Move
+the submodule together with the firmware's `components/esp-quickjs-ng/quickjs`,
+and remake `qjsc/tests/fixtures/*.qbc` with `qjs_esp_bc.py`.
+
+`compile --script` writes the compiled script next to the job file.
+
 ## Production log
 
 The device records every run and every boot until the log is collected:
@@ -79,7 +113,8 @@ cargo run -- log pull --port /dev/ttyACM0 --output production.jsonl [--no-ack]
 
 New entries are appended as JSON Lines (`device`, `id`, `boot`, `uptime_us`,
 `utc_ms`, `type`, and for runs `run_id`, `outcome`, `failed_stage`,
-`duration_ms`, `trigger`, `job_name`, `job_sha256`, `error_code`), synced to
+`duration_ms`, `trigger`, `job_name`, `job_sha256`, `error_code`, and for
+script jobs `script_sha256`, `script_pinned` and the script's `results`), synced to
 disk, and only then acknowledged so the device may reuse the space. `log pull`,
 `job push` and `job run` first set the device clock, which gives entries their
 `utc_ms`. The time comes from an NTP server (`--ntp-server`, default

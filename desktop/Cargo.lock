@@ -6906,6 +6906,7 @@ dependencies = [
  "serde_json",
  "serialport",
  "sha2 0.10.9",
+ "sidp-qjsc",
  "thiserror 2.0.21",
  "tungstenite",
  "yaml_serde",
@@ -6928,6 +6929,13 @@ dependencies = [
  "sidp-agent",
  "tempfile",
  "yaml_serde",
+]
+
+[[package]]
+name = "sidp-qjsc"
+version = "0.1.0"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

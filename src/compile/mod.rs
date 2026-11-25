@@ -9,7 +9,7 @@ mod target;
 
 pub use images::ImageHashes;
 
-use crate::job::{Job, MAX_NAME_LEN, Procedure, SchemaVersion};
+use crate::job::{Job, MAX_NAME_LEN, Procedure, SchemaVersion, Script};
 use serde::de::DeserializeOwned;
 
 /// A compile error describing which YAML input or field is wrong.
@@ -33,6 +33,20 @@ pub struct Sources<'a> {
     pub post_program: Option<&'a str>,
     /// SHA-256 of each image the job programs, by device asset name.
     pub images: &'a ImageHashes,
+    /// Script run instead of the pre/post procedures, if any.
+    pub script: Option<ScriptRef<'a>>,
+}
+
+/// The job's script, compiled by [`crate::script`] and uploaded beside it.
+pub struct ScriptRef<'a> {
+    /// Device asset name of the bytecode container.
+    pub asset: &'a str,
+    /// Pinned container hash; `None` lets the file be replaced without a new job.
+    pub sha256: Option<[u8; 32]>,
+    /// Limit per hook; 0 for the firmware default.
+    pub hook_timeout_ms: u32,
+    /// The script may use the network (esp:ws).
+    pub network: bool,
 }
 
 /// A compiled job plus non-fatal notes such as skipped legacy steps.
@@ -52,15 +66,41 @@ pub fn compile(sources: &Sources) -> Result<Compiled> {
     let post_program = optional_procedure(sources.post_program, "post-program", &mut warnings)?;
     let name = sources.name.unwrap_or(&target.variant_name).to_owned();
     check_len(&name, MAX_NAME_LEN, "job name")?;
+    let script = sources
+        .script
+        .as_ref()
+        .map(|s| script_field(s, sources))
+        .transpose()?;
     let mut job = Job {
         schema_version: SchemaVersion::Current as i32,
         target: Some(target),
         pre_program,
         post_program,
         name,
+        script,
     };
     images::pin(&mut job, sources.images, &mut warnings)?;
     Ok(Compiled { job, warnings })
+}
+
+fn script_field(script: &ScriptRef, sources: &Sources) -> Result<Script> {
+    if sources.pre_program.is_some() || sources.post_program.is_some() {
+        return Err(CompileError(
+            "a job has a script or pre/post procedures, not both".into(),
+        ));
+    }
+    if sources.images.contains_key(script.asset) {
+        return Err(CompileError(format!(
+            "the script and an image are both named '{}'",
+            script.asset
+        )));
+    }
+    Ok(Script {
+        asset: script.asset.to_owned(),
+        sha256: script.sha256.map(|h| h.to_vec()).unwrap_or_default(),
+        hook_timeout_ms: script.hook_timeout_ms,
+        network: script.network,
+    })
 }
 
 fn optional_procedure(

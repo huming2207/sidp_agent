@@ -226,6 +226,14 @@ fn add_run_fields(json: &mut serde_json::Value, run: &RunRecord) {
     json["job_name"] = run.job_name.clone().into();
     json["job_sha256"] = hex(&run.job_sha256).into();
     json["error_code"] = run.error_code.into();
+    if !run.script_sha256.is_empty() {
+        json["script_sha256"] = hex(&run.script_sha256).into();
+        json["script_pinned"] = run.script_pinned.into();
+    }
+    if !run.results_json.is_empty() {
+        json["results"] = serde_json::from_str(&run.results_json)
+            .unwrap_or_else(|_| run.results_json.clone().into());
+    }
 }
 
 /// Protobuf name of an enum value, or the number when this build does not know it.
