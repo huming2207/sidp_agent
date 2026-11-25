@@ -43,7 +43,9 @@ A script must not spin: one stretch of JavaScript may run at most about
 200 ms before the probe stops the runtime (outcome `stopped`). Waiting on the
 target doesn't count. Loop with `await target.delay(ms)` between rounds;
 there is no setTimeout. Memory is a private arena of a few MB; running out
-throws in the script and nothing else is affected.
+ends the runtime (outcome `stopped`, "InternalError: out of memory") and
+nothing else is affected. `try`/`catch` can't catch it, so keep big buffers
+few and drop them when done.
 
 Sync calls (`read32`, `readMem`, `halt`...) block the script until the probe
 answers. Promise calls (`delay`, `poll32`, `waitHalt`, `call`, `flash.*`) let
