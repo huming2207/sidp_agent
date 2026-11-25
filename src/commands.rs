@@ -1,7 +1,8 @@
 //! Management and job-compile commands of the command-line tool.
 use clap::Args;
 use prost::Message;
-use sidp_agent::compile::{self, ImageHashes, ScriptRef, Sources};
+use sidp_agent::compile::{self, ImageHashes, RunEnds, ScriptRef, Sources};
+use sidp_agent::job::RunEnd;
 use sidp_agent::manage::{
     self, hex, proto::Outcome, proto::RunResult, proto::Stage, proto::Trigger,
 };
@@ -167,9 +168,36 @@ pub struct JobSource {
     /// Job name shown by the device; defaults to the variant name.
     #[arg(long)]
     name: Option<String>,
+    /// What a passed run leaves the target doing (Cortex-M); default `reset`.
+    #[arg(long, value_enum)]
+    on_pass: Option<RunEndArg>,
+    /// What a failed or cancelled run leaves the target doing (Cortex-M); default `as-is`.
+    #[arg(long, value_enum)]
+    on_fail: Option<RunEndArg>,
     /// Image the job programs, as DEVICE_NAME=FILE (e.g. firmware.bin=build/app.bin).
     #[arg(long = "image", value_name = "NAME=FILE")]
     images: Vec<String>,
+}
+
+/// End-of-run choices of `--on-pass` and `--on-fail`.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum RunEndArg {
+    /// Clear the vector catch and debug enable, then pulse nRST: the firmware boots.
+    Reset,
+    /// Clear the vector catch and debug enable: the core goes on from where it is.
+    Resume,
+    /// Only release the SWD pins: a halted core stays halted.
+    AsIs,
+}
+
+impl From<RunEndArg> for RunEnd {
+    fn from(arg: RunEndArg) -> Self {
+        match arg {
+            RunEndArg::Reset => RunEnd::Reset,
+            RunEndArg::Resume => RunEnd::Resume,
+            RunEndArg::AsIs => RunEnd::AsIs,
+        }
+    }
 }
 
 /// Bytecode stripping levels of `--script-strip`.
@@ -267,6 +295,10 @@ fn build_job(source: &JobSource) -> Result<BuiltJob, Box<dyn Error>> {
             hook_timeout_ms: source.hook_timeout_ms,
             network: source.script_network,
         }),
+        run_end: RunEnds {
+            on_pass: source.on_pass.map_or(RunEnd::Default, RunEnd::from),
+            on_fail: source.on_fail.map_or(RunEnd::Default, RunEnd::from),
+        },
     };
     let compiled = compile::compile(&sources)?;
     for warning in &compiled.warnings {

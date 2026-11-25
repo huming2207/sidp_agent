@@ -63,7 +63,19 @@ Cortex-M targets, and for ESP32 targets every `images[].path` in
 and the device refuses to run with any other image. `--auto` also runs the job
 whenever a target is plugged in; otherwise it runs only on `job run`. A device
 busy programming answers `STATUS_BUSY` to anything that would change the job
-or its files.
+or its files, and one whose armed trap has the target answers "a trap is
+armed" (status 43): disarm, push, arm again.
+
+`--on-pass` and `--on-fail` (`reset`, `resume` or `as-is`) say how a
+Cortex-M run leaves the target. By default a passed run resets it, so the new
+firmware boots, and a failed or cancelled one leaves it as it is (pins
+released, a halted core stays halted) for a look with `agent`/GDB. `reset` and
+`resume` also clear the vector catch and turn the target's debug off, so a
+`BKPT` in the firmware faults instead of halting it with nobody attached.
+`reset` catches the reset at its vector first, so no firmware runs with debug
+on. ESP32 targets are always reset into their application, and the options
+are refused for them. Debug bits the job script sets in the target's own
+registers (STM32 `DBGMCU`) survive a reset: the script clears them itself.
 
 `compile` writes the same job to a file without a device (`-o job.pb`). Use
 `--variant NAME` when `target.yaml` lists several variants. The compiler

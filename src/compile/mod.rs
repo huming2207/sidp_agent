@@ -9,7 +9,7 @@ mod target;
 
 pub use images::ImageHashes;
 
-use crate::job::{Job, MAX_NAME_LEN, Procedure, SchemaVersion, Script};
+use crate::job::{Job, MAX_NAME_LEN, Procedure, RunEnd, SchemaVersion, Script};
 use serde::de::DeserializeOwned;
 
 /// A compile error describing which YAML input or field is wrong.
@@ -35,6 +35,19 @@ pub struct Sources<'a> {
     pub images: &'a ImageHashes,
     /// Script run instead of the pre/post procedures, if any.
     pub script: Option<ScriptRef<'a>>,
+    /// What a run leaves the target doing.
+    pub run_end: RunEnds,
+}
+
+/// What a run leaves the target doing when it passes and when it fails.
+/// `RunEnd::Default` lets the device choose: reset after a pass, as it is
+/// after a failure.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunEnds {
+    /// After a passed run.
+    pub on_pass: RunEnd,
+    /// After a failed or cancelled run.
+    pub on_fail: RunEnd,
 }
 
 /// The job's script, compiled by [`crate::script`] and uploaded beside it.
@@ -71,6 +84,13 @@ pub fn compile(sources: &Sources) -> Result<Compiled> {
         .as_ref()
         .map(|s| script_field(s, sources))
         .transpose()?;
+    let run_end = sources.run_end;
+    if target.esp32.is_some() && run_end != RunEnds::default() {
+        return Err(CompileError(
+            "an ESP32 target is always reset at the end of a run; --on-pass/--on-fail are for Cortex-M"
+                .into(),
+        ));
+    }
     let mut job = Job {
         schema_version: SchemaVersion::Current as i32,
         target: Some(target),
@@ -78,6 +98,8 @@ pub fn compile(sources: &Sources) -> Result<Compiled> {
         post_program,
         name,
         script,
+        on_pass: run_end.on_pass as i32,
+        on_fail: run_end.on_fail as i32,
     };
     images::pin(&mut job, sources.images, &mut warnings)?;
     Ok(Compiled { job, warnings })

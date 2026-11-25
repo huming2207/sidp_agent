@@ -1,8 +1,8 @@
 //! Job compiler tests against the Soul Injector example YAML files.
 use prost::Message;
-use sidp_agent::compile::{Compiled, ImageHashes, ScriptRef, Sources, compile};
+use sidp_agent::compile::{Compiled, ImageHashes, RunEnds, ScriptRef, Sources, compile};
 use sidp_agent::job::step::Op;
-use sidp_agent::job::{FlashAlgorithm, Job, MAX_STEPS, SchemaVersion, Target};
+use sidp_agent::job::{FlashAlgorithm, Job, MAX_STEPS, RunEnd, SchemaVersion, Target};
 
 const TARGET: &str = include_str!("fixtures/stm32wle5cc.yaml");
 const PRE: &str = include_str!("fixtures/pre_prog.yaml");
@@ -46,6 +46,7 @@ fn compile_with(
         post_program: post,
         images,
         script: None,
+        run_end: RunEnds::default(),
     };
     compile(&sources).map_err(|e| e.to_string())
 }
@@ -239,6 +240,7 @@ fn compile_script(
             hook_timeout_ms: 5000,
             network: true,
         }),
+        run_end: RunEnds::default(),
     };
     compile(&sources).map_err(|e| e.to_string())
 }
@@ -266,4 +268,58 @@ fn script_excludes_procedures_and_image_names() {
     assert!(both.contains("not both"), "{both}");
     let clash = error_of(compile_script(None, "firmware.bin", None));
     assert!(clash.contains("both named"), "{clash}");
+}
+
+fn compile_run_end(
+    target: &str,
+    images: &ImageHashes,
+    run_end: RunEnds,
+) -> Result<Compiled, String> {
+    let sources = Sources {
+        name: None,
+        target,
+        variant: None,
+        pre_program: None,
+        post_program: None,
+        images,
+        script: None,
+        run_end,
+    };
+    compile(&sources).map_err(|e| e.to_string())
+}
+
+#[test]
+fn run_end_defaults_to_the_device_choice() {
+    let images = image_hashes(&[("firmware.bin", FIRMWARE_HASH)]);
+    let job = compile_run_end(TARGET, &images, RunEnds::default())
+        .unwrap()
+        .job;
+    // 0 on the wire: the device resets after a pass and leaves a failure as it is.
+    assert_eq!(job.on_pass, RunEnd::Default as i32);
+    assert_eq!(job.on_fail, RunEnd::Default as i32);
+    assert_eq!(RunEnd::Default as i32, 0);
+}
+
+#[test]
+fn run_end_is_carried_for_cortex_m() {
+    let images = image_hashes(&[("firmware.bin", FIRMWARE_HASH)]);
+    let run_end = RunEnds {
+        on_pass: RunEnd::Resume,
+        on_fail: RunEnd::Reset,
+    };
+    let job = compile_run_end(TARGET, &images, run_end).unwrap().job;
+    let decoded = Job::decode(job.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(decoded.on_pass(), RunEnd::Resume);
+    assert_eq!(decoded.on_fail(), RunEnd::Reset);
+}
+
+#[test]
+fn run_end_is_refused_for_esp32() {
+    let run_end = RunEnds {
+        on_pass: RunEnd::Default,
+        on_fail: RunEnd::AsIs,
+    };
+    let error = error_of(compile_run_end(ESP32_TARGET, &esp32_images(), run_end));
+    assert!(error.contains("ESP32"), "{error}");
+    assert!(compile_run_end(ESP32_TARGET, &esp32_images(), RunEnds::default()).is_ok());
 }
