@@ -59,8 +59,11 @@ pub const STATUS_NO_SESSION: i32 = 40;
 pub const STATUS_NO_SCRIPTS: i32 = 41;
 /// Status of AGENT_OPEN when the device's job isn't a Cortex-M one.
 pub const STATUS_NEEDS_CORTEX_M: i32 = 42;
-/// Status of AGENT_OPEN (and of runs, for an exclusive trap) while a trap is armed.
+/// Status of AGENT_OPEN, job pushes and (for an exclusive trap) runs while a trap is armed.
 pub const STATUS_TRAP_ARMED: i32 = 43;
+
+/// TrapConfig.throttle_hold_ms that holds a throttled target until something resumes it.
+pub const THROTTLE_HOLD_FOREVER: u32 = u32::MAX;
 
 /// Largest bytecode container sent inline (nanopb max_size); bigger ones go by SCRIPT_UPLOAD.
 pub const MAX_INLINE: usize = 7936;
