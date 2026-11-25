@@ -262,7 +262,7 @@ enum JobCommand {
         #[command(flatten)]
         connection: Connection,
         #[command(flatten)]
-        source: JobSource,
+        source: Box<JobSource>, // boxed: PathBufs are large on Windows
         /// Also run the job whenever a target is plugged in.
         #[arg(long)]
         auto: bool,
