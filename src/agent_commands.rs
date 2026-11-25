@@ -145,11 +145,11 @@ pub fn eval(
     connection: &Connection,
     options: &AgentOptions,
     code: &str,
-    timeout_ms: u64,
+    wait_ms: u64,
 ) -> CommandResult {
     let blob = sidp_qjsc::compile_eval_container(code, "eval.js", script::Strip::None)?;
     let mut session = open(connection, options)?;
-    let result = session.script_eval(&blob, Duration::from_millis(timeout_ms));
+    let result = session.script_eval(&blob, Duration::from_millis(wait_ms));
     let printed = result
         .map_err(Box::<dyn Error>::from)
         .and_then(|r| print_result(&r));

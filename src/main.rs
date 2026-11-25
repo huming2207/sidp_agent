@@ -208,9 +208,9 @@ enum AgentCommand {
         options: agent_commands::AgentOptions,
         /// JavaScript; top-level await works.
         code: String,
-        /// How long to wait for the value.
+        /// How long to wait for the value, in milliseconds.
         #[arg(long, default_value_t = 5000, value_parser = clap::value_parser!(u64).range(1..=60000))]
-        timeout_ms: u64,
+        wait_ms: u64,
     },
     /// Run an ES module, then print the session's events as JSON lines.
     Run {
@@ -498,8 +498,8 @@ fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 connection,
                 options,
                 code,
-                timeout_ms,
-            } => agent_commands::eval(&connection, &options, &code, timeout_ms),
+                wait_ms,
+            } => agent_commands::eval(&connection, &options, &code, wait_ms),
             AgentCommand::Run {
                 connection,
                 options,
@@ -635,4 +635,17 @@ fn serve_gdb(
         served.requests
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::CommandFactory;
+
+    /// Clap checks argument definitions only in debug builds, at parse time; this
+    /// catches clashes (e.g. two `--timeout-ms` from flattened options) in tests.
+    #[test]
+    fn cli_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
 }
