@@ -35,7 +35,7 @@ interface TargetError extends Error {
 type Reg =
     | 'r0' | 'r1' | 'r2' | 'r3' | 'r4' | 'r5' | 'r6' | 'r7' | 'r8' | 'r9' | 'r10' | 'r11' | 'r12'
     | 'sp' | 'lr' | 'pc' | 'xpsr' | 'msp' | 'psp' | 'fpscr'
-    | `s${number}`  // s0-s31, with an FPU
+    | `s${number}`  // s0-s31; these and fpscr are UNSUPPORTED without an FPU
     | number;       // DCRSR REGSEL 0-127; 20 is CONTROL<<24 | FAULTMASK<<16 | BASEPRI<<8 | PRIMASK
 
 declare namespace target {
