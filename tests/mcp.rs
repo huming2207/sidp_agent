@@ -757,6 +757,7 @@ fn a_trap_is_armed_inspected_and_disarmed() {
     let (v, _) = tool_json(&replies, 5);
     assert_eq!(v["name"], "hunt");
     assert_eq!(v["incidents_per_hour"], 30);
+    assert_eq!(v["throttle_hold_ms"], "default");
     assert_eq!(v["permissions"]["write"], true);
     assert_eq!(tool_json(&replies, 7).0["armed"], false);
     let d = device.lock().unwrap();

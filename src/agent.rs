@@ -306,12 +306,16 @@ pub fn trap_status_json(st: &TrapStatus) -> Value {
         }
         out["permissions"] =
             json!({ "write": perms.write, "flash": perms.flash, "reset": perms.reset });
-        out["incidents_per_hour"] = cfg.incidents_per_hour.into();
-        // 0: the device's default (10 s).
-        out["throttle_hold_ms"] = if cfg.throttle_hold_ms == THROTTLE_HOLD_FOREVER {
-            "forever".into()
-        } else {
-            cfg.throttle_hold_ms.into()
+        // 0 is the device's default (a Kconfig choice, 12 unless changed).
+        out["incidents_per_hour"] = match cfg.incidents_per_hour {
+            0 => "default".into(),
+            n => n.into(),
+        };
+        // 0 is the device's default (10 s).
+        out["throttle_hold_ms"] = match cfg.throttle_hold_ms {
+            0 => "default".into(),
+            THROTTLE_HOLD_FOREVER => "forever".into(),
+            n => n.into(),
         };
         out["starts_this_boot"] = st.starts.into();
         out["incidents_suppressed"] = st.suppressed.into();
