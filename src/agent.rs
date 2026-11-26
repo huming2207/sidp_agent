@@ -497,7 +497,39 @@ impl Capture {
         for (i, w) in frame.iter_mut().enumerate() {
             *w = u32_at(&stack.data, i * 4).ok()?;
         }
-        Some(frame)
+        // A frame's xPSR always has the Thumb bit. Without it the stack
+        // wasn't read at the frame (the handler had already pushed more).
+        (frame[7] & (1 << 24) != 0).then_some(frame)
+    }
+
+    /// Words on the stack that point into a function with the Thumb bit set,
+    /// as return addresses do: `(address on the stack, value, name)`, from
+    /// the top of the stack. The exception frame, when there is one, is
+    /// skipped (`stacked` has it). Some can be stale values left on the
+    /// stack, not live return addresses.
+    pub fn stack_code(&self, symbols: &Symbols) -> Vec<(u32, u32, String)> {
+        let Some(stack) = self.mem.iter().find(|m| m.stack) else {
+            return Vec::new();
+        };
+        let skip = match (self.exception_frame(), self.reg(14)) {
+            // EXC_RETURN bit 4 clear: the frame has the FP registers too.
+            (Some(_), Some(lr)) if lr & 0x10 == 0 => 26,
+            (Some(_), _) => 8,
+            _ => 0,
+        };
+        stack
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .enumerate()
+            .skip(skip)
+            .filter_map(|(i, w)| {
+                let v = u32::from_le_bytes(*w);
+                let name = (v & 1 != 0).then(|| symbols.describe(v)).flatten()?;
+                Some((stack.addr.wrapping_add(4 * i as u32), v, name))
+            })
+            .collect()
     }
 
     /// The capture as JSON for an agent; `symbols` names code addresses.
@@ -555,6 +587,16 @@ impl Capture {
         }
         if let Some(fault) = &self.fault {
             out["fault"] = fault_json(fault);
+        }
+        if let Some(syms) = symbols {
+            let code = self.stack_code(syms);
+            if !code.is_empty() {
+                out["stack_code"] = code
+                    .into_iter()
+                    .map(|(at, v, name)| json!({ "at": hex(at), "value": hex(v), "symbol": name }))
+                    .collect::<Vec<_>>()
+                    .into();
+            }
         }
         let mem: Vec<Value> = self
             .mem
@@ -865,6 +907,48 @@ mod tests {
         assert_eq!(bits, ["PRECISERR", "BFARVALID"]);
         assert_eq!(j["fault"]["hfsr_bits"][0]["bit"], "FORCED");
         assert!(j["fault"].get("bfar").is_none()); // its read failed
+    }
+
+    #[test]
+    fn stack_code_names_return_addresses() {
+        let syms = Symbols {
+            funcs: vec![
+                (0x0800_0100, 0x40, "divide".into()),
+                (0x0800_0140, 0x40, "average".into()),
+                (0x0800_0180, 0x40, "main".into()),
+            ],
+        };
+        let mut words = vec![1u32, 0, 0, 0, 0, 0x0800_0151, 0x0800_010e, 0x0100_0000]; // frame
+        words.extend([0x2000_0ff0, 0x0800_0153, 0x0800_0190, 0x0800_0191, 0x0900_0001]);
+        let mut c = Capture {
+            regs: [(14u8, Some(0xFFFF_FFF9)), (16, Some(3))].into_iter().collect(),
+            mem: vec![MemRange {
+                stack: true,
+                addr: 0x2000_0fc0,
+                requested: 256,
+                data: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+            }],
+            ..Default::default()
+        };
+        // The frame's LR is in `stacked`; after it, only odd words inside a function.
+        let code = c.stack_code(&syms);
+        assert_eq!(
+            code,
+            [
+                (0x2000_0fe4, 0x0800_0153, "average+0x12".to_string()),
+                (0x2000_0fec, 0x0800_0191, "main+0x10".to_string()),
+            ]
+        );
+        let j = c.to_json(Some(&syms));
+        assert_eq!(j["stack_code"][1]["symbol"], "main+0x10");
+        assert_eq!(j["stacked"]["lr_symbol"], "average+0x10");
+
+        // A stack not read at the frame (no Thumb bit in "xPSR"): no frame,
+        // and every word is looked at.
+        c.mem[0].data[28..32].copy_from_slice(&0u32.to_le_bytes());
+        assert!(c.exception_frame().is_none());
+        assert_eq!(c.stack_code(&syms).len(), 3);
+        assert!(c.to_json(Some(&syms)).get("stacked").is_none());
     }
 
     #[test]

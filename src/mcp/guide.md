@@ -101,7 +101,10 @@ answering, answering again, reset). The probe keeps the last 64 events;
 the exception frame the core stacked (the `pc` and `lr` of the code that
 faulted), fault registers with each set bit explained, and the stack and
 memory bytes as hex. With `--elf` given to the server, code addresses also
-get function names (`lookup_symbol` works then too). Only the latest four
+get function names (`lookup_symbol` works then too), and `stack_code` lists
+the words on the stack past the exception frame that point into a function
+with the Thumb bit set, as return addresses do: read from the top, they are
+the call chain (a few can be stale values left on the stack). Only the latest four
 captures are kept.
 
 ## Recipes
