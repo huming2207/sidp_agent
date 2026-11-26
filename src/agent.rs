@@ -923,9 +923,17 @@ mod tests {
             ],
         };
         let mut words = vec![1u32, 0, 0, 0, 0, 0x0800_0151, 0x0800_010e, 0x0100_0000]; // frame
-        words.extend([0x2000_0ff0, 0x0800_0153, 0x0800_0190, 0x0800_0191, 0x0900_0001]);
+        words.extend([
+            0x2000_0ff0,
+            0x0800_0153,
+            0x0800_0190,
+            0x0800_0191,
+            0x0900_0001,
+        ]);
         let mut c = Capture {
-            regs: [(14u8, Some(0xFFFF_FFF9)), (16, Some(3))].into_iter().collect(),
+            regs: [(14u8, Some(0xFFFF_FFF9)), (16, Some(3))]
+                .into_iter()
+                .collect(),
             mem: vec![MemRange {
                 stack: true,
                 addr: 0x2000_0fc0,
