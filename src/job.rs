@@ -24,6 +24,8 @@ pub const MAX_SELF_TESTS: usize = 16;
 pub const MAX_IMAGES: usize = 8;
 /// Steps per pre/post procedure.
 pub const MAX_STEPS: usize = 96;
+/// Erase sector ranges per flash algorithm (`flash_properties.sectors`).
+pub const MAX_SECTOR_RANGES: usize = 16;
 
 #[cfg(test)]
 mod tests {
@@ -64,6 +66,10 @@ mod tests {
         assert_eq!(max_count("si.job.Target.self_tests"), MAX_SELF_TESTS);
         assert_eq!(max_count("si.job.Esp32.images"), MAX_IMAGES);
         assert_eq!(max_count("si.job.Procedure.steps"), MAX_STEPS);
+        assert_eq!(
+            max_count("si.job.FlashAlgorithm.sectors"),
+            MAX_SECTOR_RANGES
+        );
         assert_eq!(
             max_len("si.job.Script.asset"),
             crate::manage::MAX_ASSET_NAME_LEN

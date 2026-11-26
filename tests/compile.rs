@@ -122,6 +122,12 @@ fn example_target_matches_firmware_parser_rules() {
     assert_eq!(algorithm.flash_end, Some(0x0804_0000));
     assert_eq!(algorithm.page_size, 0x800);
     assert_eq!(algorithm.instructions.len(), 6792);
+    let sectors: Vec<_> = algorithm
+        .sectors
+        .iter()
+        .map(|s| (s.offset, s.size))
+        .collect();
+    assert_eq!(sectors, [(0, 0x800)]);
 
     let pre = job.pre_program.as_ref().unwrap();
     let post = job.post_program.as_ref().unwrap();
@@ -219,6 +225,76 @@ fn rejects_inputs_the_firmware_cannot_hold() {
     assert!(compile_error(&no_page_size, None).contains("page_size"));
     let wide_address = TARGET.replace("load_address: 0x20000020", "load_address: 0x120000020");
     assert!(compile_error(&wide_address, None).contains("32 bits"));
+}
+
+const WL_SECTORS: &str = "      sectors:\n        - size: 0x800\n          address: 0x0\n";
+
+/// The fixture with its sector list replaced (the flash is 0x40000 long).
+fn with_sectors(list: &str) -> String {
+    assert!(TARGET.contains(WL_SECTORS));
+    TARGET.replace(WL_SECTORS, list)
+}
+
+#[test]
+fn flash_sectors_are_carried_and_checked() {
+    // STM32F4 style: 4 x 16 KB, 1 x 64 KB, then 128 KB sectors (here up to 256 KB).
+    let f4 = with_sectors(
+        "      sectors:\n        - { size: 0x4000, address: 0x0 }\n        \
+         - { size: 0x10000, address: 0x10000 }\n        - { size: 0x20000, address: 0x20000 }\n",
+    );
+    let job = compile_target(&f4, None, None).unwrap().job;
+    let sectors: Vec<_> = algorithm_of(&job)
+        .sectors
+        .iter()
+        .map(|s| (s.offset, s.size))
+        .collect();
+    assert_eq!(
+        sectors,
+        [(0, 0x4000), (0x10000, 0x10000), (0x20000, 0x20000)]
+    );
+
+    // No list: uniform page_size sectors on the device.
+    let none = with_sectors("");
+    assert!(
+        algorithm_of(&compile_target(&none, None, None).unwrap().job)
+            .sectors
+            .is_empty()
+    );
+
+    for (bad, why) in [
+        (
+            "      sectors:\n        - { size: 0x800, address: 0x800 }\n",
+            "first not at 0",
+        ),
+        (
+            "      sectors:\n        - { size: 0x0, address: 0x0 }\n",
+            "size 0",
+        ),
+        (
+            "      sectors:\n        - { size: 0x3000, address: 0x0 }\n",
+            "not whole up to the end",
+        ),
+        (
+            "      sectors:\n        - { size: 0x4000, address: 0x0 }\n        - { size: 0x800, address: 0x2000 }\n",
+            "first range not whole sectors",
+        ),
+        (
+            "      sectors:\n        - { size: 0x800, address: 0x0 }\n        - { size: 0x800, address: 0x0 }\n",
+            "not ascending",
+        ),
+        (
+            "      sectors:\n        - { size: 0x80000, address: 0x0 }\n",
+            "bigger than the flash",
+        ),
+    ] {
+        let e = compile_error(&with_sectors(bad), None);
+        assert!(e.contains("flash sectors"), "{why}: {e}");
+    }
+    let many: String = (0..17)
+        .map(|i| format!("        - {{ size: 0x800, address: {:#x} }}\n", i * 0x800))
+        .collect();
+    let e = compile_error(&with_sectors(&format!("      sectors:\n{many}")), None);
+    assert!(e.contains("sector ranges"), "{e}");
 }
 
 fn compile_script(

@@ -1,7 +1,7 @@
 //! target.yaml conversion, keeping the checks the firmware parser made.
 use super::source::{
-    AlgorithmSource, FlashProperties, ImageSource, RangeSource, RegionSource, SelfTestSource,
-    TargetFile, Variant,
+    AlgorithmSource, FlashProperties, ImageSource, RangeSource, RegionSource, SectorSource,
+    SelfTestSource, TargetFile, Variant,
 };
 use super::{CompileError, Result, check_count, check_len, optional_u32, to_u32};
 use crate::job::memory_region::Kind;
@@ -196,7 +196,56 @@ fn apply_flash_properties(
         optional_u32(properties.program_page_timeout, "program_page_timeout")?;
     algorithm.erase_sector_timeout_ms =
         optional_u32(properties.erase_sector_timeout, "erase_sector_timeout")?;
+    if let Some(sectors) = &properties.sectors {
+        algorithm.sectors = convert_sectors(algorithm, sectors)?;
+    }
     Ok(())
+}
+
+/// The erase sector map, checked as the firmware checks it: ascending ranges
+/// from offset 0, each whole sectors of its size up to the next range, the
+/// last one up to the end of the flash.
+fn convert_sectors(
+    algorithm: &FlashAlgorithm,
+    sectors: &[SectorSource],
+) -> Result<Vec<SectorRange>> {
+    if sectors.is_empty() {
+        return Ok(Vec::new());
+    }
+    check_count(sectors.len(), MAX_SECTOR_RANGES, "flash sector ranges")?;
+    let (Some(start), Some(end)) = (algorithm.flash_start, algorithm.flash_end) else {
+        return Err(CompileError("flash sectors need address_range".into()));
+    };
+    let flash_len = end
+        .checked_sub(start)
+        .filter(|&len| len > 0)
+        .ok_or_else(|| CompileError("address_range end must be above its start".into()))?;
+    let ranges = sectors
+        .iter()
+        .map(|s| {
+            Ok(SectorRange {
+                offset: to_u32(s.address, "sectors.address")?,
+                size: to_u32(s.size, "sectors.size")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for (i, r) in ranges.iter().enumerate() {
+        let next = ranges.get(i + 1).map_or(flash_len, |n| n.offset);
+        let whole = r.size != 0
+            && (i != 0 || r.offset == 0)
+            && r.offset < next
+            && next <= flash_len
+            && (next - r.offset) % r.size == 0;
+        if !whole {
+            return Err(CompileError(format!(
+                "flash sectors: entry {i} (address {:#x}, size {:#x}) must be whole sectors from the \
+                 previous entry's end up to the next entry or the end of the flash ({flash_len:#x}), \
+                 the first at address 0",
+                r.offset, r.size
+            )));
+        }
+    }
+    Ok(ranges)
 }
 
 /// Decodes the base64 algorithm blob; block scalars may contain whitespace.

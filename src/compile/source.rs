@@ -57,6 +57,15 @@ pub struct FlashProperties {
     pub erased_byte_value: Option<u64>,
     pub program_page_timeout: Option<u64>,
     pub erase_sector_timeout: Option<u64>,
+    pub sectors: Option<Vec<SectorSource>>,
+}
+
+/// One `flash_properties.sectors` entry: sectors of `size` from `address`
+/// (an offset from the flash start) up to the next entry or the flash end.
+#[derive(Deserialize)]
+pub struct SectorSource {
+    pub size: u64,
+    pub address: u64,
 }
 
 /// Address range with an exclusive end.

@@ -75,10 +75,10 @@ declare namespace target {
 
 declare namespace flash {
     /** Through the job's flash algorithm, inside its flash range. Erase and write reset the
-     *  target first. Outside the flash, length 0 or misaligned: RangeError, target untouched. */
+     *  target first. Outside the flash, length/count 0 or misaligned: RangeError, target untouched. */
     function read(addr: number, len: number): Promise<Uint8Array>;
-    /** Whole sectors: addr and len on sector boundaries (page_size). Needs flash. */
-    function erase(addr: number, len: number): Promise<void>;
+    /** count sectors (the job's sector map, else page_size), the first starting at addr. Needs flash. */
+    function erase(addr: number, count: number): Promise<void>;
     /** Erased flash, at most 4096 bytes, a length the flash can program. Needs flash. */
     function write(addr: number, bytes: Bytes): Promise<void>;
 }
