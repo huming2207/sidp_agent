@@ -365,11 +365,28 @@ pub fn compile_job(source: &JobSource, output: &Path) -> CommandResult {
     Ok(())
 }
 
+/// "2026.11.0 (58b55e2)", "2026.11.0 (58b55e2, modified)", or the bare version
+/// from firmware that doesn't report its commit.
+fn firmware_line(info: &sidp_agent::manage::proto::DeviceInfo) -> String {
+    match (info.firmware_commit.is_empty(), info.firmware_modified) {
+        (true, false) => info.firmware_version.clone(),
+        (true, true) => format!("{} (modified)", info.firmware_version),
+        (false, false) => format!("{} ({})", info.firmware_version, info.firmware_commit),
+        (false, true) => format!(
+            "{} ({}, modified)",
+            info.firmware_version, info.firmware_commit
+        ),
+    }
+}
+
 /// `device info`.
 pub fn device_info(connection: &Connection) -> CommandResult {
     let info = connection.open()?.device_info()?;
     println!("Serial:   {}", info.serial);
-    println!("Firmware: {}", info.firmware_version);
+    println!("Firmware: {}", firmware_line(&info));
+    if !info.hardware.is_empty() {
+        println!("Hardware: Rev {}", info.hardware);
+    }
     if info.js_version.is_empty() {
         println!("Scripts:  not supported");
     } else {
@@ -603,5 +620,35 @@ fn stage_name(stage: Stage) -> &'static str {
         Stage::SelfTest => "self test",
         Stage::PostProgram => "post-program steps",
         Stage::CurrentTest => "current test",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::firmware_line;
+    use sidp_agent::manage::proto::DeviceInfo;
+
+    fn info(commit: &str, modified: bool) -> DeviceInfo {
+        DeviceInfo {
+            firmware_version: "2026.11.0".into(),
+            firmware_commit: commit.into(),
+            firmware_modified: modified,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn firmware_line_shows_commit_and_changes() {
+        assert_eq!(
+            firmware_line(&info("58b55e2", false)),
+            "2026.11.0 (58b55e2)"
+        );
+        assert_eq!(
+            firmware_line(&info("58b55e2", true)),
+            "2026.11.0 (58b55e2, modified)"
+        );
+        assert_eq!(firmware_line(&info("", true)), "2026.11.0 (modified)");
+        // Firmware from before the commit field.
+        assert_eq!(firmware_line(&info("", false)), "2026.11.0");
     }
 }

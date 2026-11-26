@@ -612,6 +612,9 @@ impl Device {
         out["probe"] = json!({
             "serial": info.serial,
             "firmware": info.firmware_version,
+            "firmware_commit": info.firmware_commit,
+            "firmware_modified": info.firmware_modified,
+            "hardware": info.hardware,
             "js_version": info.js_version,
             "js_arena_kb": info.js_arena_kb,
         });
