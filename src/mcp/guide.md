@@ -174,6 +174,11 @@ capture, the events just before, and the data the handler returned as
   `data`, where the incident keeps it.
 - In `yield` mode (default) GDB attaching or a programming run pauses the
   trap; `exclusive` refuses them while it is armed.
+- A trap starts about 3.5 s after the probe powers up; faults before that
+  aren't seen. When the server runs with `--connect-under-reset`, the probe
+  holds the target in reset from its own boot until the trap attaches: the
+  module then starts with the core halted at its reset vector and must
+  `resume()` it. The target starts about 4 s late after each probe restart.
 - Incidents per hour are limited (`incidents_per_hour`); the rest are only
   counted. The probe keeps a limited number and drops the oldest.
 - While a trap is armed no session opens: `trap_status`, `wait_event` and

@@ -243,7 +243,10 @@ pub struct TrapOptions {
     /// Let the module reset the target.
     #[arg(long)]
     allow_reset: bool,
-    /// Hold the target in reset while connecting; it then starts halted.
+    /// Hold the target in reset while connecting; it then starts halted (the
+    /// module resumes it). The device also holds it in reset from early in its
+    /// own boot until the trap attaches, so after a power-up the target starts
+    /// under watch, about 4 s late. See docs/en/agent-sessions.md.
     #[arg(long)]
     connect_under_reset: bool,
 }
