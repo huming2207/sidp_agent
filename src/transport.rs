@@ -65,9 +65,7 @@ impl UsbCdc {
     /// exclusively for PTY tests: real Soul Injector firmware requires DTR.
     /// Baud rate is CDC line coding, not the target's SWD clock.
     pub fn open(path: &str, baud: u32, settle: Duration, control_dtr: bool) -> io::Result<Self> {
-        let mut port = serialport::new(path, baud)
-            .timeout(Duration::from_millis(20))
-            .open()?;
+        let mut port = open_port(path, baud, PERMISSION_RETRY)?;
         if control_dtr {
             port.write_data_terminal_ready(false)?;
             std::thread::sleep(Duration::from_millis(100));
@@ -85,6 +83,39 @@ impl UsbCdc {
         };
         std::thread::sleep(settle);
         Ok(result)
+    }
+}
+
+/// A port node that just appeared (the device restarted) refuses opening
+/// until udev has set its group and mode: that is retried for this long.
+const PERMISSION_RETRY: Duration = Duration::from_secs(1);
+
+/// Opens `path`, retrying "permission denied" for up to `retry`. Past that it
+/// is the user's permissions, and the error says what to check.
+fn open_port(path: &str, baud: u32, retry: Duration) -> io::Result<Box<dyn SerialPort>> {
+    let deadline = Instant::now() + retry;
+    loop {
+        match serialport::new(path, baud)
+            .timeout(Duration::from_millis(20))
+            .open()
+        {
+            Ok(port) => return Ok(port),
+            Err(e) => {
+                let e = io::Error::from(e);
+                if e.kind() != io::ErrorKind::PermissionDenied {
+                    return Err(e);
+                }
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!(
+                            "{path}: {e} (is this user in the group that owns the port, e.g. dialout?)"
+                        ),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
     }
 }
 
@@ -647,5 +678,63 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod open_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn unreadable_file(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("sidp-open-{}-{name}", std::process::id()));
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        path
+    }
+
+    /// root (or CAP_DAC_OVERRIDE) opens a mode 000 file anyway: nothing to test then.
+    fn can_open_anyway(path: &std::path::Path) -> bool {
+        std::fs::File::open(path).is_ok()
+    }
+
+    #[test]
+    fn permission_denied_is_retried_until_the_mode_changes() {
+        let path = unreadable_file("late");
+        if can_open_anyway(&path) {
+            return;
+        }
+        let p2 = path.clone();
+        let fixer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            std::fs::set_permissions(&p2, std::fs::Permissions::from_mode(0o600)).unwrap();
+        });
+        let start = Instant::now();
+        let result = open_port(path.to_str().unwrap(), 115200, Duration::from_secs(2));
+        fixer.join().unwrap();
+        // Past the permission check it fails as a non-tty, which is the point:
+        // it got that far only by retrying.
+        let Err(err) = result else {
+            panic!("a regular file isn't a serial port");
+        };
+        assert_ne!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+        assert!(start.elapsed() >= Duration::from_millis(250));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn permission_denied_gives_up_with_a_hint() {
+        let path = unreadable_file("never");
+        if can_open_anyway(&path) {
+            return;
+        }
+        let start = Instant::now();
+        let err = open_port(path.to_str().unwrap(), 115200, Duration::from_millis(200))
+            .err()
+            .unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains("dialout"), "{err}");
+        assert!(start.elapsed() >= Duration::from_millis(200));
+        std::fs::remove_file(&path).unwrap();
     }
 }
