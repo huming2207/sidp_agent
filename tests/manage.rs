@@ -106,12 +106,12 @@ fn active_job_is_only_re_armed() {
         (manage::JOB_GET, job_status(Some(manage::sha256(&job)), 0)),
         (manage::JOB_SET, Vec::new()),
     ]);
-    manage::push_job(&mut session, &job, &images, Trigger::AutoOnDetect).unwrap();
+    manage::push_job(&mut session, &job, &images, Trigger::DetectFalling).unwrap();
 
     let wire = wire.borrow();
     let set = JobSetRequest::decode(wire.sent[2].payload.as_slice()).unwrap();
     assert_eq!(set.sha256, manage::sha256(&job));
-    assert_eq!(set.trigger, Trigger::AutoOnDetect as i32);
+    assert_eq!(set.trigger, Trigger::DetectFalling as i32);
 }
 
 #[test]
@@ -234,7 +234,7 @@ fn run_entry_becomes_one_json_object() {
             failed_stage: Stage::Verify as i32,
             duration_ms: 1200,
         }),
-        trigger: Trigger::AutoOnDetect as i32,
+        trigger: Trigger::DetectFalling as i32,
         job_name: "widget".to_owned(),
         job_sha256: vec![0xab; 32],
         error_code: 0x105,
@@ -254,7 +254,7 @@ fn run_entry_becomes_one_json_object() {
     assert_eq!(json["type"], "run");
     assert_eq!(json["outcome"], "OUTCOME_FAIL");
     assert_eq!(json["failed_stage"], "STAGE_VERIFY");
-    assert_eq!(json["trigger"], "TRIGGER_AUTO_ON_DETECT");
+    assert_eq!(json["trigger"], "TRIGGER_DETECT_FALLING");
     assert_eq!(json["job_sha256"], "ab".repeat(32));
     assert_eq!(json["error_code"], 0x105);
     assert!(json.get("script_sha256").is_none() && json.get("results").is_none());

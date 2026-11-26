@@ -200,6 +200,30 @@ impl From<RunEndArg> for RunEnd {
     }
 }
 
+/// What starts a run besides `job run` (`--trigger`).
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum TriggerArg {
+    /// Nothing: runs only on `job run`.
+    Manual,
+    /// The detect input falls (a button or harness pulling it to GND).
+    Falling,
+    /// The detect input rises.
+    Rising,
+    /// A target starts answering on SWD (polled); again only after it went away.
+    Swd,
+}
+
+impl From<TriggerArg> for Trigger {
+    fn from(arg: TriggerArg) -> Self {
+        match arg {
+            TriggerArg::Manual => Trigger::Manual,
+            TriggerArg::Falling => Trigger::DetectFalling,
+            TriggerArg::Rising => Trigger::DetectRising,
+            TriggerArg::Swd => Trigger::DetectSwd,
+        }
+    }
+}
+
 /// Bytecode stripping levels of `--script-strip`.
 #[derive(Clone, Copy, clap::ValueEnum)]
 pub enum StripArg {
@@ -459,13 +483,8 @@ fn push_built_job(session: &mut DeviceSession, job: &BuiltJob, trigger: Trigger)
 }
 
 /// `job push`: compiles, uploads missing files and activates the job.
-pub fn job_push(connection: &Connection, source: &JobSource, auto: bool) -> CommandResult {
+pub fn job_push(connection: &Connection, source: &JobSource, trigger: Trigger) -> CommandResult {
     let job = build_job(source)?;
-    let trigger = if auto {
-        Trigger::AutoOnDetect
-    } else {
-        Trigger::Manual
-    };
     let mut session = connection.open()?;
     set_device_time(&mut session, connection);
     push_built_job(&mut session, &job, trigger)?;
@@ -547,7 +566,9 @@ pub fn job_cancel(connection: &Connection, run_id: u32) -> CommandResult {
 fn trigger_name(trigger: Trigger) -> &'static str {
     match trigger {
         Trigger::Manual => "manual",
-        Trigger::AutoOnDetect => "auto on target detect",
+        Trigger::DetectFalling => "detect input falling",
+        Trigger::DetectRising => "detect input rising",
+        Trigger::DetectSwd => "target answering on SWD",
     }
 }
 

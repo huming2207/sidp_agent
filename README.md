@@ -49,7 +49,7 @@ does not already have, and activates the job:
 ```sh
 cargo run -- job push --port /dev/ttyACM0 \
     --target target.yaml --pre pre_prog.yaml --post post_prog.yaml \
-    --image firmware.bin=build/app.bin [--name line-a] [--auto]
+    --image firmware.bin=build/app.bin [--name line-a] [--trigger falling|rising|swd|manual]
 cargo run -- job run --port /dev/ttyACM0 --wait    # one run, waits for the result
 cargo run -- job status --port /dev/ttyACM0
 cargo run -- job cancel --port /dev/ttyACM0
@@ -60,8 +60,11 @@ cargo run -- asset push --port /dev/ttyACM0 build/app.bin --name firmware.bin
 `--image NAME=FILE` gives each image the job programs: `firmware.bin` for
 Cortex-M targets, and for ESP32 targets every `images[].path` in
 `target.yaml`, which must be `/data/<NAME>`. The job pins each image's SHA-256
-and the device refuses to run with any other image. `--auto` also runs the job
-whenever a target is plugged in; otherwise it runs only on `job run`. A device
+and the device refuses to run with any other image. `--trigger` says what
+else starts a run: `falling` (the default) or `rising`, an edge on the detect
+input (the adaptor's button pulls it to GND); `swd`, a target starting to
+answer on SWD (probed every 0.5 s, again only after it went away); `manual`,
+only `job run`. A device
 busy programming answers `STATUS_BUSY` to anything that would change the job
 or its files, and one whose armed trap has the target answers "a trap is
 armed" (status 43): disarm, push, arm again.
@@ -289,7 +292,7 @@ arm-none-eabi-gdb firmware.elf
 
 `debug` takes the same job options as `job push` and fails before attaching if
 the run does not pass. It sets the job's trigger to manual, so use `job push
---auto` afterwards to re-arm a job that runs when a target is plugged in. Both
+--trigger ...` afterwards to re-arm automatic runs. Both
 `debug` and `gdb` accept `--connect-under-reset`, which holds the target in
 reset while connecting and stops it before its first instruction. Use it for
 firmware that sleeps or reuses the SWD pins soon after boot.

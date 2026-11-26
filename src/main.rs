@@ -6,7 +6,7 @@ mod network_commands;
 mod power_commands;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use commands::{Connection, DeviceSession, JobSource};
+use commands::{Connection, DeviceSession, JobSource, TriggerArg};
 use sidp_agent::{
     listener::{Event, Listener},
     power,
@@ -373,9 +373,12 @@ enum JobCommand {
         connection: Connection,
         #[command(flatten)]
         source: Box<JobSource>, // boxed: PathBufs are large on Windows
-        /// Also run the job whenever a target is plugged in.
-        #[arg(long)]
-        auto: bool,
+        /// What else starts a run (`job run` always can): `falling` or
+        /// `rising`, an edge on the detect input (a button or harness to
+        /// GND falls); `swd`, a target starting to answer on SWD; `manual`,
+        /// nothing. Kept on the device across restarts.
+        #[arg(long, value_enum, default_value_t = TriggerArg::Falling)]
+        trigger: TriggerArg,
     },
     /// Run the device's job once.
     Run {
@@ -562,8 +565,8 @@ fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>
         JobCommand::Push {
             connection,
             source,
-            auto,
-        } => commands::job_push(&connection, &source, auto),
+            trigger,
+        } => commands::job_push(&connection, &source, trigger.into()),
         JobCommand::Run { connection, wait } => commands::job_run(&connection, wait),
         JobCommand::Status { connection } => commands::job_status(&connection),
         JobCommand::Cancel { connection, run_id } => commands::job_cancel(&connection, run_id),
